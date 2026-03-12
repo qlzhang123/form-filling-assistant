@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能填表助手</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="sidebar-container">
+        <!-- 头部控制按钮 -->
+        <div class="header">
+            <h2>📝 智能填表助手</h2>
+            <div class="controls">
+                <button id="settingsBtn" class="btn btn-primary">AI设置</button>
+                <button id="closeBtn" class="btn btn-danger">关闭边栏</button>
+            </div>
+        </div>
+        
+        <!-- 可滚动的内容区域 -->
+        <div class="scrollable-content">
+            <!-- AI设置面板（默认隐藏） -->
+            <div class="section ai-settings" id="aiSettings" style="display: none;">
+                <h3>⚙️ DeepSeek API 设置</h3>
+                <div class="settings-form">
+                    <div class="form-group">
+                        <label for="apiKey">API密钥：</label>
+                        <input type="password" id="apiKey" placeholder="输入DeepSeek API密钥">
+                        <small style="color: #718096; font-size: 11px;">密钥仅保存在本地，不会上传到服务器</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="aiModel">AI模型：</label>
+                        <select id="aiModel">
+                            <option value="deepseek-chat">deepseek-chat</option>
+                            <option value="deepseek-coder">deepseek-coder</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="temperature">创造力： <span id="tempValue">0.7</span></label>
+                        <input type="range" id="temperature" min="0" max="1" step="0.1" value="0.7">
+                    </div>
+                    <div style="display: flex; gap: 20px; margin: 10px 0;">
+                        <label>
+                            <input type="checkbox" id="enableAI" checked>
+                            启用AI分析
+                        </label>
+                        <label>
+                            <input type="checkbox" id="showThoughts">
+                            显示AI思考过程
+                        </label>
+                    </div>
+                    <div class="form-buttons">
+                        <button id="saveSettings" class="btn btn-primary">保存设置</button>
+                        <button id="testApi" class="btn btn-secondary">测试API连接</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 填表助手主界面 -->
+            <div class="section" id="formFillingSection">
+                <h3>📋 智能填表助手</h3>
+                
+                <!-- 表单URL输入区域 -->
+                <div class="form-url-input">
+                    <input type="url" id="formUrl" placeholder="输入表单URL或使用当前页面">
+                    <button id="useCurrentPage" class="btn btn-secondary">使用当前页面</button>
+                    <button id="parseForm" class="btn btn-primary">解析表单</button>
+                </div>
+                
+                <!-- 作者搜索区域 (新增) -->
+                <div class="author-search-area" id="authorSearchArea" style="display: none; margin-bottom: 15px; padding: 10px; background: #f7fafc; border-radius: 8px; border: 1px solid #e2e8f0;">
+                    <h4 style="margin-top: 0; color: #2b6cb0;">👤 第一步：搜索作者论文</h4>
+                    <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+                        <input type="text" id="authorNameInput" placeholder="输入作者姓名 (如: San Zhang)" style="flex: 1; padding: 6px; border: 1px solid #cbd5e0; border-radius: 4px;">
+                        <button id="searchAuthorBtn" class="btn btn-primary" style="padding: 6px 12px;">搜索</button>
+                    </div>
+                    
+                    <div id="paperSelectionArea" style="display: none;">
+                        <div id="paperList" style="max-height: 250px; overflow-y: auto; background: white; border: 1px solid #cbd5e0; border-radius: 4px; margin-bottom: 8px;">
+                            <!-- 论文列表 -->
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px;">
+                            <button id="prevPaperPage" class="btn btn-secondary" style="padding: 4px 8px;" disabled>上一页</button>
+                            <span id="paperPageInfo">第 1 页</span>
+                            <button id="nextPaperPage" class="btn btn-secondary" style="padding: 4px 8px;">下一页</button>
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #cbd5e0;">
+                        <div style="font-size: 12px; color: #4a5568; margin-bottom: 6px;">没找到想要的论文？可以手动输入论文标题或 DOI：</div>
+                        <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                            <input type="text" id="paperTitleInput" placeholder="输入论文标题或 DOI" style="flex: 1; padding: 6px; border: 1px solid #cbd5e0; border-radius: 4px;">
+                            <button id="searchPaperTitleBtn" class="btn btn-secondary" style="padding: 6px 12px;">搜索论文</button>
+                        </div>
+                        <button id="usePaperTitleDirectBtn" class="btn btn-primary" style="width: 100%; padding: 6px 12px;">直接使用该标题开始填表</button>
+                    </div>
+                </div>
+
+                <!-- 填表进度显示 -->
+                <div class="filling-progress" id="fillingProgress" style="display: none;">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill" style="width: 0%;"></div>
+                    </div>
+                    <div class="progress-info" id="progressInfo">准备开始填表...</div>
+                </div>
+                
+                <!-- 当前字段处理区域 -->
+                <div class="field-processing-area" id="fieldProcessingArea" style="display: none;">
+                    <div class="current-field-info" id="currentFieldInfo">
+                        <!-- 当前字段信息将在此显示 -->
+                    </div>
+                    
+                    <div id="fieldActionChoice" class="field-action-choice" style="display: none; margin-bottom: 15px;">
+                        <h4>请选择处理方式:</h4>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                            <button id="chooseAI" class="btn btn-primary">🤖 让 AI 填写</button>
+                            <button id="chooseManual" class="btn btn-secondary">✍️ 手动填写</button>
+                            <button id="chooseSkip" class="btn btn-secondary">⏭️ 跳过字段</button>
+                            <button id="chooseQuit" class="btn btn-danger">👋 退出填表</button>
+                        </div>
+                    </div>
+                    
+                    <div class="ai-thinking-display" id="aiThinkingDisplay" style="display: none;">
+                        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                            <div style="width: 20px; height: 20px; border: 2px solid #9f7aea; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                            <span>AI正在思考...</span>
+                        </div>
+                        <div id="aiThinkingContent"></div>
+                    </div>
+                    
+                    <div class="options-display" id="optionsDisplay" style="display: none;">
+                        <!-- 新增：一键填写区域 -->
+                        <div class="batch-fill-area" id="batchFillArea" style="display: none; margin-bottom: 15px; padding: 10px; background-color: #f0fff4; border: 1px solid #c6f6d5; border-radius: 6px;">
+                            <h4 style="color: #2f855a; margin-top: 0;">🚀 发现群组内其他可填写项：</h4>
+                            <div class="batch-fill-list" id="batchFillList" style="margin-bottom: 10px; font-size: 13px;">
+                                <!-- 建议项将在此动态生成 -->
+                            </div>
+                            <button id="oneClickFillBtn" class="btn btn-primary" style="width: 100%; background-color: #38a169;">✨ 一键全部填写并继续</button>
+                        </div>
+
+                        <div class="ai-recommendation" id="aiRecommendation" style="display: none;">
+                            <h4>🤖 AI推荐答案</h4>
+                            <div class="recommendation-content" id="recommendationContent"></div>
+                            <div class="recommendation-actions">
+                                <button class="btn btn-primary" id="useAiRecommendation">使用此答案</button>
+                                <button class="btn btn-secondary" id="editAiRecommendation">编辑答案</button>
+                            </div>
+                        </div>
+
+                        <!-- 新增：AI多选建议区域 -->
+                        <div class="ai-multiple-choices" id="aiMultipleChoices" style="display: none; margin-bottom: 15px;">
+                            <h4>🤔 AI 发现多个候选项，请选择：</h4>
+                            <div class="choices-list" id="choicesList" style="display: flex; flex-direction: column; gap: 8px;">
+                                <!-- 选项按钮将在此动态生成 -->
+                            </div>
+                        </div>
+                        
+                        <div class="page-extract-options" id="pageExtractOptions" style="display: none;">
+                            <h4>🔍 页面提取选项</h4>
+                            <div class="extract-options-list" id="extractOptionsList"></div>
+                        </div>
+                        
+                        <div class="manual-input-section">
+                            <h4>✍️ 手动输入</h4>
+                            <input type="text" id="manualInput" class="manual-input" placeholder="输入您的答案...">
+                            <button class="btn btn-primary" id="useManualInput">使用手动输入</button>
+                        </div>
+                        
+                        <div class="field-actions">
+                            <button class="btn btn-secondary" id="skipField">跳过此字段</button>
+                            <button class="btn btn-danger" id="quitFilling">退出填表</button>
+                        </div>
+                    </div>
+
+                    <!-- 新增：批量处理区域 -->
+                    <div class="batch-process-area" id="batchProcessArea" style="display: none; margin-bottom: 15px; padding: 15px; background-color: #ebf8ff; border: 1px solid #bee3f8; border-radius: 8px;">
+                        <h4 style="color: #2b6cb0; margin-top: 0; margin-bottom: 10px;">📦 识别到重复群组模式</h4>
+                        <p id="batchProcessHint" style="font-size: 13px; color: #4a5568; margin-bottom: 12px;">检测到连续多个相似的群组，是否要进行批量处理？</p>
+                        
+                        <div id="batchProcessInitialActions" style="display: flex; gap: 10px; margin-bottom: 15px;">
+                            <button id="startBatchProcess" class="btn btn-primary" style="flex: 1;">🚀 批量处理</button>
+                            <button id="skipBatchProcess" class="btn btn-secondary" style="flex: 1;">单个处理</button>
+                        </div>
+                        
+                        <!-- 批量项目选择区（新增） -->
+                        <div id="batchCandidateArea" style="display: none; margin-top: 10px;">
+                            <h5 id="batchCandidateLabel" style="margin-bottom: 8px; font-size: 14px; color: #2d3748;">正在搜索候选项目...</h5>
+                            <div id="batchCandidateList" style="max-height: 300px; overflow-y: auto; border: 1px solid #cbd5e0; border-radius: 4px; background: white; margin-bottom: 10px; padding: 5px;">
+                                <!-- 候选项目复选框将在此生成 -->
+                            </div>
+                            <div style="display: flex; gap: 10px;">
+                                <button id="confirmBatchSelection" class="btn btn-primary" style="flex: 2;">确认选择并执行</button>
+                                <button id="switchToManualInput" class="btn btn-secondary" style="flex: 1; font-size: 11px;">手动输入</button>
+                            </div>
+                        </div>
+
+                        <!-- 批量项目输入区 -->
+                        <div id="batchInputArea" style="display: none;">
+                            <h5 id="batchInputLabel" style="margin-bottom: 8px; font-size: 14px; color: #2d3748;">请输入要处理的项目 (每行一个):</h5>
+                            <textarea id="batchInputList" rows="5" style="width: 100%; padding: 8px; border: 1px solid #cbd5e0; border-radius: 4px; font-family: inherit; margin-bottom: 10px; font-size: 13px;" placeholder="例如：
+论文标题 1
+论文标题 2
+..."></textarea>
+                            <div style="display: flex; gap: 10px;">
+                                <button id="confirmBatchInput" class="btn btn-primary" style="flex: 1;">开始批量执行</button>
+                                <button id="cancelBatchInput" class="btn btn-secondary">返回</button>
+                            </div>
+                        </div>
+                        
+                        <!-- 批量进度区 -->
+                        <div id="batchProgressArea" style="display: none; margin-top: 15px;">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                                <span style="font-size: 13px; font-weight: bold; color: #2b6cb0;">正在并行处理...</span>
+                                <span id="batchProgressText" style="font-size: 13px; color: #4a5568;">0/0</span>
+                            </div>
+                            <div class="progress-bar" style="height: 12px; background-color: #e2e8f0; margin-bottom: 10px;">
+                                <div id="batchProgressFill" class="progress-fill" style="width: 0%; background-color: #4299e1;"></div>
+                            </div>
+                            
+                            <!-- 新增：并行思考展示区 -->
+                            <div id="batchThoughtsLog" style="max-height: 150px; overflow-y: auto; background: #2d3748; color: #a0aec0; padding: 8px; border-radius: 4px; font-family: monospace; font-size: 10px; margin-bottom: 10px;">
+                                <div style="color: #48bb78;">> 等待任务启动...</div>
+                            </div>
+
+                            <button id="stopBatchProcess" class="btn btn-danger" style="width: 100%; padding: 5px; font-size: 12px;">停止批量处理</button>
+                        </div>
+                        
+                        <!-- 批量结果表格区 -->
+                        <div id="batchResultsArea" style="display: none; margin-top: 15px;">
+                            <h5 style="margin-bottom: 10px; font-size: 14px; color: #2d3748;">批量处理结果 (可直接编辑):</h5>
+                            <div style="overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 4px;">
+                                <table id="batchResultsTable" class="batch-results-table" style="width: 100%; border-collapse: collapse; font-size: 11px; background-color: white;">
+                                    <!-- 表头和内容将动态生成 -->
+                                </table>
+                            </div>
+                            <div style="display: flex; gap: 10px; margin-top: 15px;">
+                                <button id="fillAllBatchResults" class="btn btn-primary" style="flex: 2; background-color: #3182ce;">✅ 全部填写到表单</button>
+                                <button id="closeBatchResults" class="btn btn-secondary" style="flex: 1;">关闭</button>
+                            </div>
+                        </div>
+                    </div>
+                    </div>
+                </div>
+                
+                <!-- 填表统计 -->
+                <div class="filling-stats" id="fillingStats" style="display: none;">
+                    <div class="stat-item">已填写: <span id="filledCount">0</span>/<span id="totalFields">0</span></div>
+                    <div class="stat-item">AI填写: <span id="aiFilled">0</span></div>
+                    <div class="stat-item">手动填写: <span id="manualFilled">0</span></div>
+                    <div class="stat-item">完成率: <span id="completionRate">0%</span></div>
+                </div>
+                
+                <!-- 填表控制按钮 -->
+                <div class="filling-controls" id="fillingControls" style="display: none;">
+                    <button class="btn btn-primary" id="startFilling">🤖 AI 自动填表</button>
+                    <button class="btn btn-secondary" id="pauseFilling">暂停</button>
+                    <button class="btn btn-secondary" id="resumeFilling">继续</button>
+                    <button class="btn btn-danger" id="stopFilling">停止</button>
+                </div>
+            </div>
+            
+            <!-- 填表历史记录 -->
+            <div class="section">
+                <h3>📚 填表历史</h3>
+                <div id="fillingHistory" class="history-list">
+                    <!-- 填表历史记录将在这里动态生成 -->
+                </div>
+            </div>
+        </div>
+        
+        <!-- 页脚状态 -->
+        <div class="footer">
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <div class="status" id="statusIndicator" style="flex: 1;">就绪</div>
+                <button id="backToFormBtn" class="btn btn-secondary" style="padding: 5px 10px; font-size: 12px; display: none;">🏠 回到表单</button>
+            </div>
+        </div>
+    </div>
+    
+    <script type="module" src="sidebar.js"></script>
+    
+    <style>
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</body>
+</html>

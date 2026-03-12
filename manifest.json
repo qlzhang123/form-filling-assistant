@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "智能填表助手",
+  "version": "1.0",
+  "description": "集成DeepSeek AI的智能表单填写助手",
+  "permissions": [
+    "activeTab", 
+    "storage",
+    "sidePanel",
+    "scripting",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://api.deepseek.com/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "side_panel": {
+    "default_path": "sidebar.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content_script.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "打开智能填表助手"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}
