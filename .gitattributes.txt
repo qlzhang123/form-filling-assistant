@@ -1,0 +1,8 @@
+# 所有文本文件自动检测，统一使用 LF 作为仓库存储格式
+* text=auto
+
+# 对于 .bat 脚本，强制使用 CRLF
+*.bat text eol=crlf
+
+# 标记图片为二进制文件
+*.png binary
