@@ -762,6 +762,18 @@ ${JSON.stringify(fieldInfo, null, 2)}
             const authorsStr = Array.isArray(known.authors) ? known.authors.join(', ') : String(known.authors || '');
 
             const heuristic = async () => {
+                const fieldName = (field.name || '').toLowerCase();
+                const fieldLabel = (field.label || '').toLowerCase();
+
+                // 如果字段名或标签明确是起始页，直接返回 known.firstPage
+                if (fieldName.includes('start_page') || fieldName.includes('startpage') ||
+                    fieldLabel.includes('起始页') || (fieldLabel.includes('起始') && fieldLabel.includes('页'))) {
+                    return String(known.firstPage || '');
+                }
+                if (fieldName.includes('end_page') || fieldName.includes('endpage') ||
+                    fieldLabel.includes('终止页') || fieldLabel.includes('结束页') || (fieldLabel.includes('终止') && fieldLabel.includes('页'))) {
+                    return String(known.lastPage || '');
+                }
                 if (label.includes('title') || label.includes('题目') || label.includes('标题')) return String(known.title || '');
                 if ((label.includes('作者') || label.includes('author')) && (label.includes('姓名') || label.includes('name')) && known.currentAuthor) return String(known.currentAuthor);
                 if (label.includes('author') || label.includes('作者')) return authorsStr;
