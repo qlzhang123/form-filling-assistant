@@ -765,6 +765,32 @@ ${JSON.stringify(fieldInfo, null, 2)}
                 const fieldName = (field.name || '').toLowerCase();
                 const fieldLabel = (field.label || '').toLowerCase();
 
+                // ===== 增强：语言字段识别 =====
+                // 常见语言字段的关键词
+                const langKeywords = ['language', 'lang', '语种', '语言', '文章语言', '出版语言', '书写语言', '主要语言'];
+                const isLangField = langKeywords.some(kw => fieldLabel.includes(kw) || fieldName.includes(kw));
+                if (isLangField) {
+                    const rawCode = String(known.language || '').toLowerCase().trim();
+                    if (rawCode) {
+                       // 提取主要语言代码（例如 en-US -> en）
+                        const mainCode = rawCode.split('-')[0];
+                        // 根据字段标签的语言（中/英）返回对应文本
+                        if (fieldLabel.includes('language') || fieldLabel.includes('lang')) {
+                            // 英文标签环境，返回英文名称
+                           if (mainCode === 'en') return 'English';
+                            if (mainCode === 'zh') return 'Chinese';
+                            return mainCode; // 其他代码原样返回
+                        } else {
+                            // 中文标签环境，返回中文名称
+                            if (mainCode === 'en') return '英文';
+                            if (mainCode === 'zh') return '中文';
+                            return mainCode;
+                        }
+                    }
+                    // 如果已知数据中没有语言信息，则返回 UNKNOWN
+                    return 'UNKNOWN';
+                }
+
                 // 如果字段名或标签明确是起始页，直接返回 known.firstPage
                 if (fieldName.includes('start_page') || fieldName.includes('startpage') ||
                     fieldLabel.includes('起始页') || (fieldLabel.includes('起始') && fieldLabel.includes('页'))) {
@@ -869,18 +895,7 @@ ${JSON.stringify(fieldInfo, null, 2)}
                 if (label.includes('发表日') || label.includes('出版日') || ((label.includes('day') || label.includes('日')) && (label.includes('发表') || label.includes('出版') || label.includes('publish') || label.includes('publication')))) {
                     return known.publicationDay ? String(known.publicationDay) : 'UNKNOWN';
                 }
-                if (label.includes('language') || label.includes('语言')) {
-                    const code = String(known.language || '').toLowerCase().trim();
-                    if (!code) return 'UNKNOWN';
-                    if (label.includes('language')) {
-                        if (code === 'en') return 'English';
-                        if (code === 'zh') return 'Chinese';
-                        return code;
-                    }
-                    if (code === 'en') return '英文';
-                    if (code === 'zh') return '中文';
-                    return code;
-                }
+                
                 const isStartPage = (label.includes('起始') || label.includes('首页') || label.includes('start') || label.includes('first')) && label.includes('page');
                 const isEndPage = (label.includes('终止') || label.includes('末页') || label.includes('end') || label.includes('last')) && label.includes('page');
                 const isPageRange = (label.includes('页码') || label.includes('pages') || label.includes('page range')) && !isStartPage && !isEndPage;

@@ -1306,7 +1306,9 @@ class FormFillingSidebar {
                     if (!merged.publicationDate && s2.publicationDate) merged.publicationDate = s2.publicationDate;
                     pushKeywords(s2.keywords);
                 }
-                
+                if (!merged.language && merged.title) {
+                    merged.language = this.guessLanguageFromTitle(merged.title);
+                }
                 merged.keywords = Array.from(kwSet).filter(Boolean);
             } catch (e) {}
             this.selectedPaper = merged;
@@ -1377,6 +1379,22 @@ class FormFillingSidebar {
         if (!this.fillingInProgress) {
             this.startFillingProcess();
         }
+    }
+
+    /**
+    * 根据论文标题猜测语言（中文/英文）
+    * @param {string} title - 论文标题
+    * @returns {string} 'zh' 或 'en' 或 ''
+    */
+    guessLanguageFromTitle(title) {
+        if (!title) return '';
+        // 检测是否包含中文字符
+        const chineseRegex = /[\u4e00-\u9fa5]/;
+        if (chineseRegex.test(title)) {
+            return 'zh';
+        }
+        // 默认假设为英文
+        return 'en';
     }
 
     renderFormFields(fields) {
