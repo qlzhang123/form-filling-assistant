@@ -764,7 +764,7 @@ ${JSON.stringify(fieldInfo, null, 2)}
             const heuristic = async () => {
                 const fieldName = (field.name || '').toLowerCase();
                 const fieldLabel = (field.label || '').toLowerCase();
-
+                const label = fieldLabel;
                 // ===== 增强：语言字段识别 =====
                 // 常见语言字段的关键词
                 const langKeywords = ['language', 'lang', '语种', '语言', '文章语言', '出版语言', '书写语言', '主要语言'];
@@ -828,11 +828,6 @@ ${JSON.stringify(fieldInfo, null, 2)}
                     }
                     return 'UNKNOWN';
                 }
-                if (
-                    (label.includes('venue') || label.includes('conference') || label.includes('journal') || label.includes('期刊') || label.includes('会议')) &&
-                    !(label.includes('地址') || label.includes('地点') || label.includes('address') || label.includes('location') || label.includes('组织者') || label.includes('organizer') || label.includes('organiser') || label.includes('chair'))
-                ) return String(known.venue || '');
-                if (label.includes('year') || label.includes('年份') || label.includes('出版')) return String(known.year || '');
                 const isConferenceDateField =
                     (label.includes('会议') || label.includes('conference') || label.includes('event')) &&
                     (label.includes('日期') || label.includes('时间') || label.includes('date') || label.includes('time')) &&
@@ -885,6 +880,14 @@ ${JSON.stringify(fieldInfo, null, 2)}
                     }
                     return 'UNKNOWN';
                 }
+
+                if (label.includes('year') || label.includes('年份') || label.includes('出版')) return String(known.year || '');
+
+                if (
+                    (label.includes('venue') || label.includes('conference') || label.includes('journal') || label.includes('期刊') || label.includes('会议')) &&
+                    !(label.includes('地址') || label.includes('地点') || label.includes('address') || label.includes('location') || label.includes('组织者') || label.includes('organizer') || label.includes('organiser') || label.includes('chair'))
+                ) return String(known.venue || '');
+                
 
                 if (label.includes('发表日期') || label.includes('出版日期') || (label.includes('publication') && label.includes('date')) || (label.includes('publish') && label.includes('date'))) {
                     return known.publicationDate ? String(known.publicationDate) : 'UNKNOWN';

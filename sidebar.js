@@ -7,7 +7,7 @@ import { ToolExecutor, ReActAgent } from './js/react_agent.js';
 import { FormFillingAgent } from './js/form_agent.js';
 import { EnhancedToolExecutor } from './js/tool_executor.js';
 import { FormParser } from './js/form_parser.js';
-import { unifiedSearchAuthors, unifiedGetPublications, getPaperByDOI, getPaperByDOIAllSources, unifiedSearchPapers } from './js/api_client.js';
+import { unifiedSearchAuthors, unifiedGetPublications, getPaperByDOI, getPaperByDOIAllSources, unifiedSearchPapers , searchConferenceEventDate } from './js/api_client.js';
 
 class FormFillingSidebar {
     constructor() {
@@ -1310,6 +1310,30 @@ class FormFillingSidebar {
                     merged.language = this.guessLanguageFromTitle(merged.title);
                 }
                 merged.keywords = Array.from(kwSet).filter(Boolean);
+                if (merged.venue && merged.year) {
+                try {
+                    const confDateResult = await searchConferenceEventDate(merged.venue, merged.year);
+                    if (confDateResult.success && confDateResult.data) {
+                        merged.conferenceEventDate = confDateResult.data.conferenceEventDate || '';
+                        merged.conferenceStartDate = confDateResult.data.conferenceStartDate || '';
+                        merged.conferenceEndDate = confDateResult.data.conferenceEndDate || '';
+                        merged.conferenceStartYear = confDateResult.data.conferenceStartYear || '';
+                        merged.conferenceStartMonth = confDateResult.data.conferenceStartMonth || '';
+                        merged.conferenceStartDay = confDateResult.data.conferenceStartDay || '';
+                        merged.conferenceEndYear = confDateResult.data.conferenceEndYear || '';
+                        merged.conferenceEndMonth = confDateResult.data.conferenceEndMonth || '';
+                        merged.conferenceEndDay = confDateResult.data.conferenceEndDay || '';
+
+                        // 存入发现缓存（供后续字段使用）
+                        if (this.formFillingAgent && this.formFillingAgent.discoveryCache) {
+                            const cacheKey = `_conference_event_date_${merged.venue}_${merged.year}`;
+                            this.formFillingAgent.discoveryCache[cacheKey] = confDateResult.data;
+                        }
+                    }
+                } catch (e) {
+                    console.warn('会议日期查询失败:', e);
+                }
+            }
             } catch (e) {}
             this.selectedPaper = merged;
         }
