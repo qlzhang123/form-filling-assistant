@@ -544,6 +544,9 @@ async function getSemanticScholarPublications(authorId, offset, limit) {
         items: (data.data || []).map(item => ({
             title: item.title,
             authors: item.authors ? item.authors.map(a => a.name) : [],
+            authorAffiliations: item.authors ? item.authors.map(a => 
+                (a.affiliations || []).join('; ')
+            ) : [],
             venue: item.venue || '',
             year: item.year ? String(item.year) : '',
             doi: item.externalIds?.DOI || '',
@@ -699,6 +702,9 @@ async function getOpenAlexAuthorPublications(authorId, offset, limit, filters = 
             ...extractOpenAlexPages(item),
             title: item.title,
             authors: (item.authorships || []).map(a => a.author?.display_name).filter(Boolean),
+            authorAffiliations: (item.authorships || []).map(a => 
+                a.institutions?.map(inst => inst.display_name).join('; ') || ''
+            ),
             venue: item.primary_location?.source?.display_name || '',
             year: item.publication_year ? String(item.publication_year) : '',
             language: normalizeLanguageCode(item.language),

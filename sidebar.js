@@ -54,7 +54,8 @@ class FormFillingSidebar {
         this.ccfRatings = {};
         this.venueAliasOverrides = {};
         this.ccfRatingOverrides = {};
-        
+        this.skipBatchMode = false;
+        this._tempAuthors = [];   // 临时存储作者列表，用于 agent 创建后传递
         this.init();
     }
 
@@ -1235,6 +1236,14 @@ class FormFillingSidebar {
     async selectPaper(paper) {
         console.log('用户选择了论文:', paper);
         this.selectedPaper = { ...(paper || {}) };
+        window.__tempAuthors = (this.selectedPaper.authors || []).map((name, index) => {
+            let affiliation = '';
+            if (this.selectedPaper.authorAffiliations && this.selectedPaper.authorAffiliations[index]) {
+                affiliation = this.selectedPaper.authorAffiliations[index];
+            }
+            return { name, affiliation };
+        });
+        console.log('✅ 已保存作者列表到 window.__tempAuthors:', window.__tempAuthors);
         this.setStatus(`已选择: ${paper.title}，正在补充元数据...`, 'searching');
         
         const doi = this.selectedPaper.doi;
@@ -1335,6 +1344,35 @@ class FormFillingSidebar {
                 }
             }
             } catch (e) {}
+            // 强制拆分会议日期区间为开始和结束日期
+            if (merged.conferenceEventDate && !merged.conferenceStartDate) {
+                const parts = String(merged.conferenceEventDate).split(/[~\-至]/);
+                if (parts.length >= 2) {
+                    merged.conferenceStartDate = parts[0].trim();
+                    merged.conferenceEndDate = parts[1].trim();
+                } else {
+                    merged.conferenceStartDate = merged.conferenceEventDate;
+                    merged.conferenceEndDate = merged.conferenceEventDate;
+                }
+            }
+
+            if (this.formFillingAgent && this.formFillingAgent.discoveryCache) {
+                // 更新会议日期专用缓存（如果有）
+                const cacheKey = `_conference_event_date_${merged.venue}_${merged.year}`;
+                if (this.formFillingAgent.discoveryCache[cacheKey]) {
+                    // 如果缓存中有原始数据，我们也更新它的起止日期
+                    this.formFillingAgent.discoveryCache[cacheKey].conferenceStartDate = merged.conferenceStartDate;
+                    this.formFillingAgent.discoveryCache[cacheKey].conferenceEndDate = merged.conferenceEndDate;
+                }
+                
+                // 更新论文元数据缓存（如果有）
+                const metaKey = `_paper_meta_for_${merged.title}`;
+                if (this.formFillingAgent.discoveryCache[metaKey]) {
+                    this.formFillingAgent.discoveryCache[metaKey].conferenceStartDate = merged.conferenceStartDate;
+                    this.formFillingAgent.discoveryCache[metaKey].conferenceEndDate = merged.conferenceEndDate;
+                }
+            }
+
             this.selectedPaper = merged;
         }
 
@@ -1392,6 +1430,26 @@ class FormFillingSidebar {
             '筛选条件': { label: '筛选条件', answer: JSON.stringify(filterCtx), fieldType: 'text' },
             '数据来源': { label: '数据来源', answer: this.selectedPaper.source || this.currentSource || '', fieldType: 'text' }
         };
+
+        // 将作者列表存入发现缓存，供表格处理使用
+        if (this.formFillingAgent) {
+            // 将作者列表存入临时变量，供后续 agent 使用
+            const authorsWithAffil = (this.selectedPaper.authors || []).map((name, index) => {
+                let affiliation = '';
+                if (this.selectedPaper.authorAffiliations && this.selectedPaper.authorAffiliations[index]) {
+                    affiliation = this.selectedPaper.authorAffiliations[index];
+                }
+                return { name, affiliation };
+            });
+
+            // 保存到临时属性，确保即使 agent 未创建也不会丢失
+            this._tempAuthors = authorsWithAffil;
+
+            // 如果 agent 已存在，直接存入缓存（兼容性处理）
+            if (this.formFillingAgent) {
+                this.formFillingAgent.discoveryCache._current_paper_authors = authorsWithAffil;
+            }
+        }
         
         // 隐藏搜索区域，显示填表控制
         this.authorSearchArea.style.display = 'none';
@@ -1453,11 +1511,17 @@ class FormFillingSidebar {
         try {
             // 初始化 Agent
             const llmClient = new DeepSeekLLM(this.aiSettings.apiKey, this.aiSettings.model);
-            const toolExecutor = new EnhancedToolExecutor();
+            const toolExecutor = new EnhancedToolExecutor(this.formTabId); // 传入当前表单标签页的 ID
             
             this.formFillingAgent = new FormFillingAgent(llmClient, toolExecutor, (stepInfo) => {
                 this.handleAgentStep(stepInfo);
             });
+
+            // 将暂存的作者列表存入 agent 缓存
+            if (this._tempAuthors && this._tempAuthors.length > 0) {
+                this.formFillingAgent.discoveryCache._current_paper_authors = this._tempAuthors;
+            }
+            this.formFillingAgent.formTabId = this.formTabId; // 供 agent 内部使用
 
             // 准备表单结构并分组
             const formStructure = {
@@ -1467,6 +1531,17 @@ class FormFillingSidebar {
             };
             
             this.fieldGroups = await this.formFillingAgent._groupFields(this.currentFormFields, formStructure);
+            // 强制将作者相关的群组标记为表格
+            this.fieldGroups.forEach(group => {
+                // 如果群组名称或标签包含“作者”，则视为表格
+                if ((group.name && group.name.includes('作者')) || (group.label && group.label.includes('作者'))) {
+                    group.isTable = true;
+                    // 确保 children 存在（用于表格处理）
+                    if (!group.children && group.fields) {
+                        group.children = group.fields.map(f => ({ ...f, isField: true }));
+                    }
+                }
+            });
             console.log('字段分组完成:', this.fieldGroups);
             
             // 注入已选择的论文信息到 Discovery Cache
@@ -1537,71 +1612,111 @@ class FormFillingSidebar {
 
     async processNextField() {
         if (!this.fillingInProgress || this.currentGroupIndex >= this.fieldGroups.length) {
-            // 填表完成
             this.finishFilling();
             return;
         }
-        
+
         const currentGroup = this.fieldGroups[this.currentGroupIndex];
-        
-        // 【新增】处理 OR 关系的跳过逻辑
-        // 如果当前是 OR 关系组，且该组已经有字段被成功填写（method='ai'或'manual'），则跳过后续字段
-        if (currentGroup.relationship === 'or' && this.currentFieldIndexInGroup > 0) {
-            let hasFilledInGroup = false;
-            // 检查该组内之前的字段是否已填写
-            for (let i = 0; i < this.currentFieldIndexInGroup; i++) {
-                const prevField = currentGroup.fields[i];
-                if (this.filledFields[prevField.name] && this.filledFields[prevField.name].method !== 'skip') {
-                    hasFilledInGroup = true;
-                    break;
-                }
+
+        if (currentGroup.isTable) {
+            this.setStatus(`正在批量填写表格: ${currentGroup.label}...`, 'searching');
+            try {
+                // 调用 agent 的表格处理方法
+                await this.formFillingAgent.processTable(currentGroup, 0, []);
+
+                // 将表格内的所有字段标记为已填写（AI 方式）
+                currentGroup.fields.forEach(field => {
+                    if (!this.filledFields[field.name]) {
+                        this.filledFields[field.name] = {
+                            label: field.label || field.name,
+                            method: 'ai',
+                            timestamp: Date.now()
+                        };
+                        // 同时更新上下文（如果有值）
+                        if (this.formFillingAgent.filledContext[field.name]) {
+                            this.filledContext[field.name] = this.formFillingAgent.filledContext[field.name];
+                        }
+                    }
+                });
+
+                // 标记该群组已处理
+                this.batchProcessedGroups.add(this.currentGroupIndex);
+
+                // 更新进度条和统计
+                this.updateStats();
+                const totalFilled = Object.keys(this.filledFields).length;
+                const progressPercent = (totalFilled / this.currentFormFields.length) * 100;
+                this.progressFill.style.width = `${progressPercent}%`;
+                this.progressInfo.textContent = `已填写 ${totalFilled}/${this.currentFormFields.length} 个字段`;
+
+                this.setStatus(`表格处理完成`, 'success');
+                // 移动到下一个群组
+                this.currentGroupIndex++;
+                this.currentFieldIndexInGroup = 0;
+                this.processNextField();
+            } catch (error) {
+                console.error('处理表格出错:', error);
+                this.setStatus(`表格处理出错: ${error.message}`, 'error');
+                // 出错时也跳过该群组，避免卡死
+                this.currentGroupIndex++;
+                this.currentFieldIndexInGroup = 0;
+                this.processNextField();
             }
-            if (hasFilledInGroup) {
-                console.log(`⏭️ 检测到互斥组 ${currentGroup.name} 已有填写项，跳过后续字段`);
-                this.skipCurrentField();
-                return; 
-            }
+            return;
         }
 
-        // 【新增】检查重复群组批量处理
-        // 注意：这里需要确保 currentGroupIndex 还是原来的，没有被上面的逻辑改变
+        // ===== 原有重复群组批量模式检测（跳过表格群组）=====
         const pattern = this.repeatedPatterns.find(p => p.groupIdxs[0] === this.currentGroupIndex);
         const authorRowCtx = this.getAuthorRowContextForGroup(this.currentGroupIndex, currentGroup);
-        if (pattern && !this.batchProcessedGroups.has(this.currentGroupIndex)) {
-            if (authorRowCtx) {
-                this.batchProcessedGroups.add(this.currentGroupIndex);
+        if (pattern && !this.batchProcessedGroups.has(this.currentGroupIndex) && !currentGroup.isTable) {
+            if (this.skipBatchMode) {
+                // 用户选择跳过批量，直接进入单个字段处理
             } else {
                 this.currentBatchPattern = pattern;
                 this.showBatchProcessHint(pattern);
                 return;
             }
         }
-        
+
+        // 单个字段处理
         const field = currentGroup.fields[this.currentFieldIndexInGroup];
-        
-        // 锁定当前处理对象，防止异步操作中索引变化导致的字段不匹配
         this.activeField = field;
         this.activeGroup = currentGroup;
 
-        if (authorRowCtx) {
-            this.filledContext['_当前作者'] = { label: '当前作者', answer: authorRowCtx.name, fieldType: 'text' };
-            this.filledContext['_作者行号'] = { label: '作者行号', answer: String(authorRowCtx.index + 1), fieldType: 'text' };
-            if (this.formFillingAgent && this.formFillingAgent.discoveryCache) {
-                this.formFillingAgent.discoveryCache['_current_author_name'] = authorRowCtx.name;
-                this.formFillingAgent.discoveryCache['_current_author_index'] = String(authorRowCtx.index + 1);
-            }
-        }
-        
-        // 显示当前字段和群组信息
         this.displayCurrentFieldInfo(field, currentGroup);
-        
-        // 隐藏选择界面，直接启动 AI 处理
         this.fieldActionChoice.style.display = 'none';
         this.aiThinkingDisplay.style.display = 'none';
         this.optionsDisplay.style.display = 'none';
-        
-        // 自动启动 AI
+
+        // 如果字段已填写（可能被之前的批量处理标记），直接跳过
+        if (this.filledFields[field.name]) {
+            console.log(`字段 ${field.name} 已填写，跳过`);
+            this._moveToNextField();
+            return;
+        }
+
         await this.processFieldWithAI(field);
+    }
+
+    /**
+     * 顺序移动到下一个字段/群组（不检查是否已填）
+     * 用于跳过当前字段后直接进入下一个
+     */
+    _moveToNextField() {
+        if (this.currentGroupIndex >= this.fieldGroups.length) {
+            this.finishFilling();
+            return;
+        }
+
+        const currentGroup = this.fieldGroups[this.currentGroupIndex];
+        this.currentFieldIndexInGroup++;
+
+        if (this.currentFieldIndexInGroup >= currentGroup.fields.length) {
+            this.currentGroupIndex++;
+            this.currentFieldIndexInGroup = 0;
+        }
+
+        this.processNextField();
     }
 
     async handleChoice(choice) {
@@ -2252,18 +2367,17 @@ class FormFillingSidebar {
 
     skipCurrentField() {
         const field = this.activeField;
-        
         if (!field) return;
 
-        // 将字段标记为已处理（跳过），使其在“一键填写”后的自动跳转中被视为已完成
+        // 将字段标记为跳过
         this.filledFields[field.name] = {
             label: field.label || field.name,
             method: 'skip',
             timestamp: Date.now()
         };
 
-        // 移动到下一个未填写的字段
-        this.moveToNextUnfilledField();
+        // 顺序移动到下一个字段
+        this._moveToNextField();
     }
 
     _moveToImmediateNextField() {
@@ -2851,7 +2965,7 @@ class FormFillingSidebar {
     }
 
     skipBatchProcess() {
-        this.batchProcessedGroups.add(this.currentBatchPattern.groupIdxs[0]);
+        this.skipBatchMode = true;  // 新增属性，在构造函数中初始化为 false
         this.batchProcessArea.style.display = 'none';
         this.processNextField();
     }

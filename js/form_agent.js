@@ -431,11 +431,8 @@ ${JSON.stringify(fieldInfo, null, 2)}
                 return { success: true }; // 群组本身总是算成功处理
             } else if (node.isTable) {
                 console.log(`\n${indent}📊 进入表格: ${node.label}`);
-                const currentGroupSiblings = node.children.filter(c => c.isField);
-                // 表格处理：遍历所有子节点（字段）
-                for (const child of node.children) {
-                    await processNode(child, depth + 1, currentGroupSiblings);
-                }
+                // 调用专门的表格处理方法
+                await this.processTable(node, depth, siblings);
                 return { success: true };
             } else if (node.isField) {
                 return await processField(node, depth, siblings);
@@ -516,6 +513,522 @@ ${JSON.stringify(fieldInfo, null, 2)}
         }
         
         return results;
+    }
+
+    /**
+     * 获取表格所有行的输入框信息（每行按列顺序返回）
+     * 返回数组，每项是该行输入框的数组，每个元素包含 field 对象（含 name, type, xpath）和 label
+     */
+    async getTableRowsWithColumns() {
+        const rows = [];
+        try {
+            // 使用更通用的选择器：所有表格行（包括可能不在 tbody 内的行）
+            const trs = await this.toolExecutor.execute(
+                'GetPageElements',
+                { selector: 'table tr', tabId: this.formTabId },
+                { tabId: this.formTabId }
+            );
+            if (!trs.success || !trs.elements) return rows;
+
+            for (let i = 0; i < trs.elements.length; i++) {
+                // 获取该行内的所有输入框
+                const selector = `table tr:nth-child(${i+1}) input, table tr:nth-child(${i+1}) select, table tr:nth-child(${i+1}) textarea`;
+                const inputs = await this.toolExecutor.execute(
+                    'GetPageElements',
+                    { selector, tabId: this.formTabId },
+                    { tabId: this.formTabId }
+                );
+                if (inputs.success && inputs.elements) {
+                    const rowFields = inputs.elements.map(el => ({
+                        field: { name: el.name || el.id, type: el.type, xpath: el.xpath },
+                        label: el.label || ''
+                    }));
+                    rows.push(rowFields);
+                } else {
+                    // 即使该行没有输入框，也添加一个空数组以保持行数一致
+                    rows.push([]);
+                }
+            }
+        } catch (e) {
+            console.error('获取表格行列失败', e);
+        }
+        return rows;
+    }
+
+    async getAllTableInputs() {
+        // 首选：针对您的test1.html表格结构
+        const primarySelectors = [
+            '#author-table tbody input',          // 精准命中作者表格内的所有输入框
+            '#author-table input',                 // 更宽松
+            '.author-table tbody input',            // 可能类名
+            'table tbody input'                      // 通用
+        ];
+
+        for (const selector of primarySelectors) {
+            const result = await this.toolExecutor.execute(
+                'GetPageElements',
+                { selector, tabId: this.formTabId },
+                { tabId: this.formTabId }
+            );
+            if (result.success && result.elements && result.elements.length > 0) {
+                console.log(`getAllTableInputs 使用选择器 "${selector}" 获取到 ${result.elements.length} 个输入框`);
+                return result.elements.map(el => ({
+                    field: { name: el.name || el.id, type: el.type, xpath: el.xpath },
+                    label: el.label || ''
+                }));
+            }
+        }
+
+        // 备选：如果上述都失败，则回退到之前的多选择器组合
+        const fallbackSelectors = [
+            'table input, table select, table textarea',
+            'input:not([type="hidden"]), select, textarea'
+        ];
+        for (const selector of fallbackSelectors) {
+            const result = await this.toolExecutor.execute(
+                'GetPageElements',
+                { selector, tabId: this.formTabId },
+                { tabId: this.formTabId }
+            );
+            if (result.success && result.elements && result.elements.length > 0) {
+                console.log(`getAllTableInputs 使用回退选择器 "${selector}" 获取到 ${result.elements.length} 个输入框`);
+                return result.elements.map(el => ({
+                    field: { name: el.name || el.id, type: el.type, xpath: el.xpath },
+                    label: el.label || ''
+                }));
+            }
+        }
+
+        console.warn('所有选择器均未找到输入框');
+        return [];
+    }
+
+    /**
+     * 获取表格第一行的输入框（用于推断每行列数）
+     */
+    async getFirstRowInputs() {
+        const selectors = [
+            '#author-table tbody tr:first-child input',
+            '#author-table tbody tr:first-child select',
+            '#author-table tbody tr:first-child textarea',
+            'table tbody tr:first-child input'
+        ];
+        for (const selector of selectors) {
+            const result = await this.toolExecutor.execute(
+                'GetPageElements',
+                { selector, tabId: this.formTabId },
+                { tabId: this.formTabId }
+            );
+            if (result.success && result.elements) {
+                return result.elements.map(el => ({
+                    field: { name: el.name || el.id, type: el.type, xpath: el.xpath },
+                    label: el.label || ''
+                }));
+            }
+        }
+        return [];
+    }
+    
+
+    async processTable(node, depth, siblings) {
+        const indent = '  '.repeat(depth);
+        console.log(`\n${indent}📊 开始批量处理表格: ${node.label}`);
+
+        // 获取作者列表
+        let authors = this.discoveryCache._current_paper_authors || [];
+        if ((!authors || authors.length === 0) && typeof window !== 'undefined' && window.__tempAuthors) {
+            console.log(`${indent}从 window.__tempAuthors 恢复作者信息`);
+            authors = window.__tempAuthors;
+            this.discoveryCache._current_paper_authors = authors;
+        }
+
+        if (!authors || authors.length === 0) {
+            console.log(`${indent}⚠️ 未找到作者信息，跳过表格`);
+            return;
+        }
+        console.log(`${indent}📋 需要填写 ${authors.length} 位作者:`, authors.map(a => a.name).join(', '));
+
+        const NAME_PREFIX = 'author_name_';
+        const AFF_PREFIX = 'author_affiliation_';
+
+        // 逐行处理，动态添加行直到填写成功
+        for (let i = 1; i <= authors.length; i++) {
+            const author = authors[i-1];
+            const nameFieldName = `${NAME_PREFIX}${i}`;
+            const affFieldName = `${AFF_PREFIX}${i}`;
+
+            // 填写姓名（如果失败则添加行重试）
+            let nameFilled = false;
+            let nameAttempts = 0;
+            const MAX_ATTEMPTS = 20;
+
+            while (!nameFilled && nameAttempts < MAX_ATTEMPTS) {
+                console.log(`${indent}尝试填写作者 ${i} 姓名: ${author.name}`);
+                const nameResult = await this.fillFieldValue({ name: nameFieldName }, author.name);
+                if (nameResult && nameResult.success) {
+                    nameFilled = true;
+                    console.log(`${indent}作者 ${i} 姓名填写成功`);
+                } else {
+                    console.log(`${indent}作者 ${i} 姓名填写失败，尝试添加行...`);
+                    const added = await this.clickAddButton();
+                    if (!added) {
+                        console.log(`${indent}无法点击添加按钮，停止`);
+                        return;
+                    }
+                    await this.delay(500); // 等待 DOM 更新
+                    nameAttempts++;
+                }
+            }
+
+            if (!nameFilled) {
+                console.log(`${indent}无法填写作者 ${i} 姓名，停止`);
+                return;
+            }
+
+            // 获取单位
+            let affiliation = author.affiliation || '';
+            if (!affiliation && author.name) {
+                try {
+                    const res = await this.toolExecutor.execute(
+                        'GetAuthorDetailsSemanticScholar',
+                        author.name,
+                        { discoveryCache: this.discoveryCache, tabId: this.formTabId }
+                    );
+                    if (res.success && res.data && res.data.affiliations) {
+                        affiliation = Array.isArray(res.data.affiliations)
+                            ? res.data.affiliations.join('; ')
+                            : res.data.affiliations;
+                    }
+                } catch (e) {
+                    console.warn(`获取作者 ${author.name} 单位失败`, e);
+                }
+            }
+
+            // 填写单位（如果存在且失败则添加行重试）
+            if (affiliation) {
+                let affFilled = false;
+                let affAttempts = 0;
+                while (!affFilled && affAttempts < MAX_ATTEMPTS) {
+                    const affResult = await this.fillFieldValue({ name: affFieldName }, affiliation);
+                    if (affResult && affResult.success) {
+                        affFilled = true;
+                        console.log(`${indent}作者 ${i} 单位填写成功`);
+                    } else {
+                        console.log(`${indent}作者 ${i} 单位填写失败，尝试添加行...`);
+                        const added = await this.clickAddButton();
+                        if (!added) {
+                            console.log(`${indent}无法点击添加按钮，停止`);
+                            return;
+                        }
+                        await this.delay(500);
+                        affAttempts++;
+                    }
+                }
+                if (!affFilled) {
+                    console.log(`${indent}无法填写作者 ${i} 单位，停止`);
+                    return;
+                }
+            } else {
+                console.log(`${indent}作者 ${i} 无单位信息，跳过`);
+            }
+        }
+
+        console.log(`${indent}表格处理完成`);
+    }
+    /**
+     * 检查指定字段名的输入框是否存在
+     */
+    async checkFieldExists(fieldName) {
+        const result = await this.toolExecutor.execute(
+            'GetPageElements',
+            { selector: `[name="${fieldName}"]`, tabId: this.formTabId },
+            { tabId: this.formTabId }
+        );
+        return result.success && result.elements && result.elements.length > 0;
+    }
+
+    async clickAddButton() {
+        const addButtonSelectors = [
+            '.action-btn',
+            'button[onclick*="addRow"]',
+            '#add-author-btn',
+            'button:contains("添加作者")',  // 注意 :contains 不是标准 CSS，需确保 GetPageElements 能处理
+            'button[title*="add"]',
+            'button[aria-label*="add"]'
+        ];
+        for (const sel of addButtonSelectors) {
+            try {
+                const result = await this.toolExecutor.execute(
+                    'ClickElement',
+                    { selector: sel, tabId: this.formTabId },
+                    { tabId: this.formTabId }
+                );
+                if (result.success) {
+                    console.log(`点击添加按钮成功: ${sel}`);
+                    return true;
+                }
+            } catch (e) {
+                console.warn(`尝试点击 ${sel} 失败:`, e);
+            }
+            await this.delay(300);
+        }
+        return false;
+    }       
+
+    // 获取表头文本数组
+    async getTableHeaders() {
+        let headers = [];
+        // 方案1：标准 thead 中的 th
+        const result1 = await this.toolExecutor.execute(
+            'GetPageElements',
+            { selector: 'table thead th', tabId: this.formTabId },
+            { tabId: this.formTabId }
+        );
+        if (result1.success && result1.elements && result1.elements.length > 0) {
+            headers = result1.elements.map(el => el.textContent || '').filter(Boolean);
+        }
+
+        // 如果没找到，尝试获取表格第一行中的所有 td
+        if (headers.length === 0) {
+            const result2 = await this.toolExecutor.execute(
+                'GetPageElements',
+                { selector: 'table tbody tr:first-child td', tabId: this.formTabId },
+                { tabId: this.formTabId }
+            );
+            if (result2.success && result2.elements && result2.elements.length > 0) {
+                headers = result2.elements.map(el => el.textContent || '').filter(Boolean);
+            }
+        }
+
+        // 如果还是没找到，尝试获取第一行输入框的数量，并生成默认列名
+        if (headers.length === 0) {
+            const firstRowInputs = await this.toolExecutor.execute(
+                'GetPageElements',
+                { selector: 'table tbody tr:first-child input, table tbody tr:first-child select, table tbody tr:first-child textarea', tabId: this.formTabId },
+                { tabId: this.formTabId }
+            );
+            if (firstRowInputs.success && firstRowInputs.elements) {
+                const colCount = firstRowInputs.elements.length;
+                headers = Array.from({ length: colCount }, (_, i) => `列 ${i+1}`);
+            }
+        }
+
+        return headers;
+    }
+
+    // 调整表格行数（添加或删除）
+    async adjustTableRows(count, action) {
+        console.log(`adjustTableRows: action=${action}, count=${count}`);
+        if (action === 'add') {
+            const addButtonSelectors = [
+                '.action-btn',
+                'button[onclick*="addRow"]',
+                'button:contains("添加作者")',
+                '#add-author-btn'
+            ];
+            let currentRows = await this.getTableRowCount();
+            const targetRows = currentRows + count;
+            let attempts = 0;
+            console.log(`添加行: 当前行数=${currentRows}, 目标行数=${targetRows}`);
+            while (currentRows < targetRows && attempts < 20) {
+                let clicked = false;
+                for (const sel of addButtonSelectors) {
+                    try {
+                        const result = await this.toolExecutor.execute(
+                            'ClickElement',
+                            { selector: sel, tabId: this.formTabId },
+                            { tabId: this.formTabId }
+                        );
+                        if (result.success) {
+                            clicked = true;
+                            console.log(`点击添加按钮成功: ${sel}`);
+                            break;
+                        }
+                    } catch (e) {}
+                    await this.delay(300);
+                }
+                if (!clicked) {
+                    console.log(`⚠️ 无法自动添加行，请手动添加`);
+                    break;
+                }
+                await this.delay(500);
+                const newRows = await this.getTableRowCount();
+                console.log(`添加后新行数: ${newRows}`);
+                if (newRows > currentRows) {
+                    currentRows = newRows;
+                    attempts = 0; // 成功增加，重置尝试次数
+                } else {
+                    attempts++;
+                    console.log(`添加行未增加，尝试次数: ${attempts}`);
+                    if (attempts >= 20) {
+                        console.log(`⚠️ 添加行多次尝试无效，停止`);
+                        break;
+                    }
+                }
+            }
+        } else if (action === 'remove') {
+            let currentRows = await this.getTableRowCount();
+            const targetRows = currentRows - count;
+            console.log(`删除行: 当前行数=${currentRows}, 目标行数=${targetRows}`);
+            while (currentRows > targetRows) {
+                const deleteButtons = await this.getDeleteButtons();
+                if (deleteButtons.length === 0) {
+                    console.log(`未找到删除按钮`);
+                    break;
+                }
+                const lastButton = deleteButtons[deleteButtons.length - 1];
+                try {
+                    await this.toolExecutor.execute(
+                        'ClickElement',
+                        { selector: lastButton.xpath, tabId: this.formTabId },
+                        { tabId: this.formTabId }
+                    );
+                    console.log(`点击删除按钮`);
+                    await this.delay(300);
+                    const newRows = await this.getTableRowCount();
+                    console.log(`删除后新行数: ${newRows}`);
+                    if (newRows < currentRows) {
+                        currentRows = newRows;
+                    } else {
+                        console.log(`删除行未减少，停止`);
+                        break;
+                    }
+                } catch (e) {
+                    console.log(`删除按钮点击失败: ${e.message}`);
+                    break;
+                }
+            }
+        }
+    }
+
+    // 获取所有删除按钮（返回包含 XPath 的数组）
+    async getDeleteButtons() {
+        const result = await this.toolExecutor.execute(
+            'GetPageElements',
+            { selector: 'table tbody tr button', tabId: this.formTabId },
+            { tabId: this.formTabId }
+        );
+        const buttons = [];
+        if (result.success && result.elements) {
+            for (const el of result.elements) {
+                if (el.textContent && el.textContent.includes('删除')) {
+                    // 使用元素自带的 XPath（由 GetPageElements 返回）
+                    if (el.xpath) {
+                        buttons.push({ xpath: el.xpath, element: el });
+                    }
+                }
+            }
+        }
+        return buttons;
+    }
+
+
+    async getTableRowCount() {
+        try {
+            // 扩展选择器列表，覆盖更多表格结构
+            const selectors = [
+                '#author-table tbody tr',        // 特定 ID 的表格体行
+                'table tbody tr',                 // 标准表格体行
+                'table tr',                        // 所有表格行（包括表头）
+                '.author-table tbody tr',          // 类名表格
+                '[role="table"] [role="row"]',     // ARIA 表格
+                '.ant-table-row',                   // Ant Design 表格行
+                '.el-table__row',                    // Element UI 表格行
+                '.data-row',                          // 常见数据行类名
+                'tr'                                   // 最后退回到所有 tr（但可能误抓，所以放最后）
+            ];
+            
+            for (const sel of selectors) {
+                const result = await this.toolExecutor.execute(
+                    'GetPageElements',
+                    { selector: sel, tabId: this.formTabId },
+                    { tabId: this.formTabId }
+                );
+                if (result.success && result.elements && result.elements.length > 0) {
+                    console.log(`getTableRowCount 使用选择器 "${sel}" 获取到 ${result.elements.length} 行`);
+                    return result.elements.length;
+                }
+            }
+
+            // 如果上述选择器都未找到行，尝试根据输入框数量估算行数（假设每行有固定数量的输入框，比如姓名+单位两个）
+            const inputResult = await this.toolExecutor.execute(
+                'GetPageElements',
+                { selector: 'table input, table select, table textarea', tabId: this.formTabId },
+                { tabId: this.formTabId }
+            );
+            if (inputResult.success && inputResult.elements && inputResult.elements.length > 0) {
+                // 假设每行有两个输入框（姓名和单位），估算行数
+                const estimatedRows = Math.ceil(inputResult.elements.length / 2);
+                console.log(`根据输入框数量估算行数: ${estimatedRows}`);
+                return estimatedRows;
+            }
+        } catch (e) {
+            console.warn('获取表格行数失败', e);
+        }
+        return 0;
+    }
+
+    async fillFieldValue(field, value) {
+        if (!field || !value) return { success: false, message: '参数无效' };
+        try {
+            const result = await this.toolExecutor.execute(
+                'FillFormField',
+                { fieldName: field.name, value, tabId: this.formTabId },
+                { tabId: this.formTabId }
+            );
+            return result; // 假设 result 有 success 字段
+        } catch (e) {
+            console.warn(`填写字段 ${field.name} 失败`, e);
+            return { success: false, message: e.message };
+        }
+    }
+
+
+    /**
+     * 获取表格中每一行的输入字段信息
+     * 返回数组，每项是该行输入字段的数组（每个元素包含 field 对象和 label）
+     */
+    async getTableRows() {
+        const rows = [];
+        try {
+            // 获取所有行
+            const trs = await this.toolExecutor.execute(
+                'GetPageElements',
+                { selector: 'tbody tr', tabId: this.formTabId },
+                { tabId: this.formTabId }
+            );
+            if (!trs.success || !trs.elements) return rows;
+
+            for (let i = 0; i < trs.elements.length; i++) {
+                // 获取该行内的输入框，使用 nth-child 选择器
+                const selector = `tbody tr:nth-child(${i+1}) input, tbody tr:nth-child(${i+1}) select, tbody tr:nth-child(${i+1}) textarea`;
+                const inputs = await this.toolExecutor.execute(
+                    'GetPageElements',
+                    { selector, tabId: this.formTabId },
+                    { tabId: this.formTabId }
+                );
+                if (inputs.success && inputs.elements) {
+                    const rowFields = inputs.elements.map(el => ({
+                        field: { 
+                            name: el.name || el.id,  // 优先使用 name，若空则用 id
+                            type: el.type 
+                        },
+                        label: el.label || ''  // GetPageElements 返回的每个元素已包含 label 字段
+                    }));
+                    rows.push(rowFields);
+                }
+            }
+        } catch (e) {
+            console.error('获取表格行失败', e);
+        }
+        return rows;
+    }
+
+    /**
+     * 简单的延迟函数
+     */
+    delay(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 
     _displayFieldInfo(field) {
@@ -764,6 +1277,10 @@ ${JSON.stringify(fieldInfo, null, 2)}
             const heuristic = async () => {
                 const fieldName = (field.name || '').toLowerCase();
                 const fieldLabel = (field.label || '').toLowerCase();
+                // 解析字段名中的序号，如 "会议日期 [1]"
+                const fieldNameWithIndex = field.name || '';
+                const indexMatch = fieldNameWithIndex.match(/\[(\d+)\]\s*$/);
+                const indexHint = indexMatch ? parseInt(indexMatch[1], 10) : null;
                 const label = fieldLabel;
                 // ===== 增强：语言字段识别 =====
                 // 常见语言字段的关键词
@@ -837,11 +1354,21 @@ ${JSON.stringify(fieldInfo, null, 2)}
                 const isConferenceEndDateField =
                     isConferenceDateField && (label.includes('结束') || label.includes('end') || label.includes('to') || label.includes('终止'));
                 if (isConferenceDateField) {
+                    // 1. 明确有开始/结束关键词
                     if (isConferenceStartDateField) return known.conferenceStartDate ? String(known.conferenceStartDate) : 'UNKNOWN';
                     if (isConferenceEndDateField) return known.conferenceEndDate ? String(known.conferenceEndDate) : 'UNKNOWN';
+
+                    // 2. 根据序号映射
+                    if (indexHint !== null) {
+                        if (indexHint === 1) return known.conferenceStartDate ? String(known.conferenceStartDate) : 'UNKNOWN';
+                        if (indexHint === 2) return known.conferenceEndDate ? String(known.conferenceEndDate) : 'UNKNOWN';
+                    }
+
+                    // 3. 无序号时返回整个区间或开始日期
                     if (known.conferenceEventDate) return String(known.conferenceEventDate);
                     if (known.conferenceStartDate) return String(known.conferenceStartDate);
 
+                    // 4. 如果已知数据中没有，尝试通过工具查询（保留原有工具查询逻辑）
                     const confName = String(known.venueRaw || known.conferenceName || known.venue || '').trim();
                     const confYear = String(known.year || '').trim();
                     if (confName && confYear && this.toolExecutor && this.toolExecutor.execute) {
@@ -873,8 +1400,11 @@ ${JSON.stringify(fieldInfo, null, 2)}
                                     });
                                 }
                             }
+                            // 根据当前字段类型返回
                             if (isConferenceStartDateField) return known.conferenceStartDate ? String(known.conferenceStartDate) : 'UNKNOWN';
                             if (isConferenceEndDateField) return known.conferenceEndDate ? String(known.conferenceEndDate) : 'UNKNOWN';
+                            if (indexHint === 1) return known.conferenceStartDate ? String(known.conferenceStartDate) : 'UNKNOWN';
+                            if (indexHint === 2) return known.conferenceEndDate ? String(known.conferenceEndDate) : 'UNKNOWN';
                             return String(known.conferenceEventDate);
                         }
                     }

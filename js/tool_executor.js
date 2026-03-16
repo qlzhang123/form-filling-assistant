@@ -2,9 +2,20 @@ import { searchPublications, searchAuthors, getPublicationByKey, getAuthorByPid 
 import { searchConferenceLocation, searchConferenceOrganizers, searchConferenceEventDate } from './api_client.js';
 
 class EnhancedToolExecutor {
-    constructor() {
+    //constructor() {
+    //    this.tools = {};
+    //    this.registerDefaultTools();
+    //}
+
+    constructor(tabId = null) {
         this.tools = {};
+        this.tabId = tabId;          // 保存当前活动的标签页 ID
         this.registerDefaultTools();
+    }
+
+    // 设置标签页 ID（可在运行时更新）
+    setTabId(tabId) {
+        this.tabId = tabId;
     }
 
     registerTool(name, description, func) {
@@ -217,6 +228,51 @@ class EnhancedToolExecutor {
             'GetPageElements',
             '获取页面上的表单元素信息',
             async (selector) => this.getPageElements(selector)
+        );
+
+        this.registerTool(
+            'ClickElement',
+            '点击指定的元素，用于添加表格行等操作。输入格式：可以是 CSS 选择器字符串，或 { selector: "...", tabId: 123 }。需要提供标签页 ID。',
+            async (params, context = {}) => {
+                try {
+                    // 解析参数
+                    let selector, tabId;
+                    if (typeof params === 'string') {
+                        selector = params;
+                        tabId = context.tabId || this.tabId;
+                    } else if (params && typeof params === 'object') {
+                        selector = params.selector;
+                        tabId = params.tabId || context.tabId || this.tabId;
+                    }
+
+                    if (!selector) {
+                        return { success: false, message: '缺少 CSS 选择器' };
+                    }
+                    if (!tabId) {
+                        return { success: false, message: '缺少标签页 ID，无法确定目标页面' };
+                    }
+
+                    // 发送消息到目标标签页的内容脚本
+                    return new Promise((resolve) => {
+                        chrome.tabs.sendMessage(
+                            tabId,
+                            { action: 'clickElement', data: { selector } },
+                            (response) => {
+                                if (chrome.runtime.lastError) {
+                                    resolve({
+                                        success: false,
+                                        message: `与内容脚本通信失败: ${chrome.runtime.lastError.message}`
+                                    });
+                                } else {
+                                    resolve(response || { success: true, message: '已触发点击' });
+                                }
+                            }
+                        );
+                    });
+                } catch (error) {
+                    return { success: false, message: `执行点击工具时出错: ${error.message}` };
+                }
+            }
         );
     }
 

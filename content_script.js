@@ -135,6 +135,10 @@ class FormFillingContentScript {
                 });
                 break;
 
+            case 'clickElement':
+                this.clickElement(data.selector, sendResponse);
+                break;
+
             default:
                 console.warn('未知的消息动作:', action);
                 sendResponse({ success: false, message: `未知的动作: ${action}` });
@@ -1067,6 +1071,33 @@ class FormFillingContentScript {
         // 在实际应用中，应该只允许执行白名单中的操作
         console.warn('安全警告：不允许执行任意脚本');
         return '由于安全限制，无法执行自定义脚本';
+    }
+
+    /**
+     * 点击指定选择器的元素
+     * @param {string} selector - CSS 选择器
+     * @param {function} sendResponse - 回调函数
+     */
+    // 在 clickElement 方法中增加 XPath 支持
+    clickElement(selector, sendResponse) {
+        try {
+            let element;
+            if (selector.startsWith('//')) {
+                // XPath
+                const result = document.evaluate(selector, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                element = result.singleNodeValue;
+            } else {
+                element = document.querySelector(selector);
+            }
+            if (!element) {
+                sendResponse({ success: false, message: `未找到元素: ${selector}` });
+                return;
+            }
+            element.click();
+            sendResponse({ success: true, message: '已点击元素' });
+        } catch (error) {
+            sendResponse({ success: false, message: `点击元素失败: ${error.message}` });
+        }
     }
 }
 
