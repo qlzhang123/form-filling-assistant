@@ -6,20 +6,17 @@
   "permissions": [
     "activeTab",
     "storage",
-    "sidePanel",
     "scripting",
     "tabs"
   ],
   "host_permissions": [
     "https://api.deepseek.com/*",
     "http://*/*",
-    "https://*/*"
+    "https://*/*",
+    "file://*/*"  
   ],
-  "side_panel": {
-    "default_path": "sidebar.html"
-  },
   "background": {
-    "service_worker": "background.js"
+    "scripts": ["background.js"]                     
   },
   "content_scripts": [
     {
@@ -31,7 +28,17 @@
   "action": {
     "default_title": "打开智能填表助手"
   },
+  "sidebar_action": {                                 
+    "default_title": "智能填表助手",
+    "default_panel": "sidebar.html"
+  },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "browser_specific_settings": {                      
+    "gecko": {
+      "id": "fill-assistant@example.org",
+      "strict_min_version": "109.0"
+    }
   }
 }

@@ -1,5 +1,12 @@
 # 智能填表助手浏览器插件
 
+## 关于更换浏览器进行测试
+Chrome：运行 node switch-manifest.js chrome，然后加载扩展。
+
+Firefox：运行 node switch-manifest.js firefox，然后在 about:debugging 中加载临时扩展。
+
+记得填写apikey
+
 ## 项目概述
 
 这是一个融合了原有搜索助手和表单填写功能的全新浏览器插件，实现了完整的ReAct智能体架构，能够在浏览器环境中自动填写各种表单。
