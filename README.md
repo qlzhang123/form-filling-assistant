@@ -1,7 +1,7 @@
 # 智能填表助手浏览器插件
 
 ## 关于更换浏览器进行测试
-Chrome：运行 node switch-manifest.js chrome，然后加载扩展。
+Chrome（兼容Microsoft Edge）：运行 node switch-manifest.js chrome，然后加载扩展。
 
 Firefox：运行 node switch-manifest.js firefox，然后在 about:debugging 中加载临时扩展。
 
