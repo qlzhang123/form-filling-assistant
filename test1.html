@@ -433,7 +433,7 @@
                     <th>序号</th>
                     <th>*姓名*</th>
                     <th>工作单位（分号隔开）</th>
-                    <th>BIRD编号</th>
+                    <th>BRID编号</th>
                     <th>*本人*</th>
                     <th>操作</th>
                 </tr>
@@ -443,7 +443,7 @@
                     <td class="row-index">1</td>
                     <td><input type="text" name="author_name_1" placeholder="Tian-Yi Che" value="Tian-Yi Che"></td>
                     <td><input type="text" name="author_affiliation_1" placeholder="单位A; 单位B"></td>
-                    <td><input type="text" name="author_bird_1" placeholder="BIRD-2024-001"></td>
+                    <td><input type="text" name="author_brid_1" placeholder="BRID-2024-001"></td>
                     <td class="radio-cell"><input type="radio" name="author_self" value="1" checked></td>
                     <td>
                         <button type="button" class="btn-operation" onclick="deleteRow(this)">删除</button>
@@ -455,7 +455,7 @@
                     <td class="row-index">2</td>
                     <td><input type="text" name="author_name_2" placeholder="Xian-Ling Mao" value="Xian-Ling Mao"></td>
                     <td><input type="text" name="author_affiliation_2" placeholder="单位C; 单位D"></td>
-                    <td><input type="text" name="author_bird_2" placeholder="BIRD-2024-002"></td>
+                    <td><input type="text" name="author_brid_2" placeholder="BRID-2024-002"></td>
                     <td class="radio-cell"><input type="radio" name="author_self" value="2"></td>
                     <td>
                         <button type="button" class="btn-operation" onclick="deleteRow(this)">删除</button>
@@ -467,7 +467,7 @@
                     <td class="row-index">3</td>
                     <td><input type="text" name="author_name_3" placeholder="Tian Lan" value="Tian Lan"></td>
                     <td><input type="text" name="author_affiliation_3" placeholder="单位E; 单位F"></td>
-                    <td><input type="text" name="author_bird_3" placeholder="BIRD-2024-003"></td>
+                    <td><input type="text" name="author_brid_3" placeholder="BRID-2024-003"></td>
                     <td class="radio-cell"><input type="radio" name="author_self" value="3"></td>
                     <td>
                         <button type="button" class="btn-operation" onclick="deleteRow(this)">删除</button>
@@ -479,7 +479,7 @@
                     <td class="row-index">4</td>
                     <td><input type="text" name="author_name_4" placeholder="Heyan Huang" value="Heyan Huang"></td>
                     <td><input type="text" name="author_affiliation_4" placeholder="单位G; 单位H"></td>
-                    <td><input type="text" name="author_bird_4" placeholder="BIRD-2024-004"></td>
+                    <td><input type="text" name="author_brid_4" placeholder="BRID-2024-004"></td>
                     <td class="radio-cell"><input type="radio" name="author_self" value="4"></td>
                     <td>
                         <button type="button" class="btn-operation" onclick="deleteRow(this)">删除</button>
@@ -566,10 +566,10 @@
             // 更新三个输入框的 name 属性
             const nameInput = row.querySelector('input[name^="author_name_"]');
             const affInput = row.querySelector('input[name^="author_affiliation_"]');
-            const birdInput = row.querySelector('input[name^="author_bird_"]');
+            const bridInput = row.querySelector('input[name^="author_brid_"]');
             if (nameInput) nameInput.name = `author_name_${newIndex}`;
             if (affInput) affInput.name = `author_affiliation_${newIndex}`;
-            if (birdInput) birdInput.name = `author_bird_${newIndex}`;
+            if (bridInput) bridInput.name = `author_brid_${newIndex}`;
 
             // 更新单选按钮的 value 和选中状态
             const radio = row.querySelector('input[type="radio"]');
