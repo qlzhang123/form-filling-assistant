@@ -618,6 +618,7 @@ class FormFillingSidebar {
             
             const fieldCount = this.currentFormFields.length;
             if (fieldCount > 0) {
+                this.resetToStartPage();
                 this.setStatus(`成功解析 ${fieldCount} 个字段，请选择论文`, 'success');
                 // 解析成功后，不直接开始填表，而是显示作者搜索
                 this.authorSearchArea.style.display = 'block';
@@ -2403,7 +2404,7 @@ class FormFillingSidebar {
         
         
         
-        this.resetFillingInterface();
+        this.resetToStartPage();
     }
 
     finishFilling() {
@@ -2420,10 +2421,32 @@ class FormFillingSidebar {
             completedAt: new Date().toISOString()
         });
         
-        this.resetFillingInterface();
+        this.resetToStartPage();
     }
 
-    resetFillingInterface() {
+    resetToStartPage() {
+        // 重置填表相关状态
+        this.fillingInProgress = false;
+        this.currentFieldIndex = 0;
+        this.currentGroupIndex = 0;
+        this.currentFieldIndexInGroup = 0;
+        this.filledFields = {};
+        this.filledContext = {};
+        this.activeField = null;
+        this.activeGroup = null;
+        this.batchProcessedGroups.clear();
+        this.currentBatchPattern = null;
+        this.skipBatchMode = false;
+        this.batchCandidatesData.clear();
+        this.batchExecutionCancelled = false;
+
+        // 清空选中的论文及列表（让用户重新选择）
+        this.selectedPaper = null;
+        this.currentPapers = [];
+        this.rawPapers = [];
+        this._tempAuthors = [];
+
+        // 隐藏所有填表相关 UI 区域
         this.fieldProcessingArea.style.display = 'none';
         this.fieldActionChoice.style.display = 'none';
         this.aiThinkingDisplay.style.display = 'none';
@@ -2432,8 +2455,23 @@ class FormFillingSidebar {
         this.batchFillArea.style.display = 'none';
         this.aiMultipleChoices.style.display = 'none';
         this.pageExtractOptions.style.display = 'none';
-        
+        this.batchProcessArea.style.display = 'none';
+        this.batchResultsArea.style.display = 'none';
+        this.fillingProgress.style.display = 'none';
+        this.fillingControls.style.display = 'none';
+        this.fillingStats.style.display = 'none';
+
+        // 显示开始页面（作者搜索区域 & 论文选择区域）
+        this.authorSearchArea.style.display = 'block';
+        // 若已有论文列表（从之前的搜索中），则显示；若为空，用户可重新搜索
+        this.paperSelectionArea.style.display = 'block';
+
+        // 启用“开始填表”按钮
         this.startFillingBtn.disabled = false;
+        this.startFillingBtn.textContent = '开始填表';
+
+        // 清空当前字段信息显示
+        this.currentFieldInfo.innerHTML = '';
     }
 
     pauseFillingProcess() {
@@ -2455,7 +2493,8 @@ class FormFillingSidebar {
         
         
         
-        this.resetFillingInterface();
+        
+        this.resetToStartPage();
     }
 
     // ====== 填表历史管理 ======
