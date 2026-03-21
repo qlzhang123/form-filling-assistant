@@ -418,8 +418,19 @@ body {
 
 /* 历史记录 */
 .history-list {
-    max-height: 200px;
+    max-height: 80px;
     overflow-y: auto;
+}
+
+.history-section {
+    padding: 8px 12px;        /* 减少上下内边距，左右保持不变 */
+    margin-bottom: 5px;        /* 减少底部外边距 */
+}
+
+.history-section h3 {
+    font-size: 14px;           /* 标题稍微调小 */
+    margin-bottom: 5px;        /* 标题下方间距减小 */
+    padding-bottom: 3px;       /* 下划线距离减小 */
 }
 
 .history-item {
