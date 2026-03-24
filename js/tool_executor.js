@@ -1,5 +1,13 @@
 import { searchPublications, searchAuthors, getPublicationByKey, getAuthorByPid } from './dblp_api.js';
-import { searchConferenceLocation, searchConferenceOrganizers, searchConferenceEventDate } from './api_client.js';
+import { searchConferenceLocation, searchConferenceOrganizers, searchConferenceEventDate,fetchWithRetry, APIS, normalizeDoi } from './api_client.js';
+import { 
+    SEMANTIC_SCHOLAR_PAPER_SCHEMA, 
+    SEMANTIC_SCHOLAR_AUTHOR_SCHEMA,
+    CROSSREF_WORK_SCHEMA,
+    OPENALEX_WORK_SCHEMA,
+    DBLP_PAPER_SCHEMA,
+    DBLP_AUTHOR_SCHEMA
+} from './schemas.js';
 
 class EnhancedToolExecutor {
     //constructor() {
@@ -18,15 +26,43 @@ class EnhancedToolExecutor {
         this.tabId = tabId;
     }
 
-    registerTool(name, description, func) {
-        /**
-         * 向工具箱中注册一个新工具。
-         */
+    registerTool(name, description, func, schema = null) {
         if (name in this.tools) {
             console.warn(`警告:工具 '${name}' 已存在，将被覆盖。`);
         }
-        this.tools[name] = {"description": description, "func": func};
+        this.tools[name] = {
+            description: description,
+            func: func,
+            schema: schema
+        };
         console.log(`工具 '${name}' 已注册。`);
+    }
+
+    getToolsDescription() {
+        let desc = '';
+        for (const [name, tool] of Object.entries(this.tools)) {
+            desc += `### ${name}\n`;
+            desc += `描述: ${tool.description}\n`;
+            if (tool.schema && tool.schema.parameters) {
+                desc += `输入参数:\n`;
+                const props = tool.schema.parameters.properties || {};
+                const required = tool.schema.parameters.required || [];
+                for (const [pName, pDef] of Object.entries(props)) {
+                    const reqMark = required.includes(pName) ? '(必需)' : '(可选)';
+                    desc += `- ${pName} ${reqMark}: ${pDef.type || 'any'} - ${pDef.description || ''}\n`;
+                }
+                // 添加提示：如何按需请求字段
+                if (name === 'GetPaperDetailsSemanticScholar') {
+                    desc += `- 使用示例: GetPaperDetailsSemanticScholar[{"doi": "10.xxx", "fields": ["title", "authors"]}]  // 只请求标题和作者\n`;
+                } else if (name === 'GetWorkOpenAlex') {
+                    desc += `- 使用示例: GetWorkOpenAlex[{"doi": "10.xxx", "select": ["title", "authorships", "publication_year"]}]  // 只请求标题、作者、年份\n`;
+                } else if (name === 'GetWorkCrossRef') {
+                    desc += `- 使用示例: GetWorkCrossRef[{"doi": "10.xxx", "select": ["DOI", "title", "author"]}]  // 只请求必要字段\n`;
+                }
+            }
+            desc += `返回字段: 包含该 API 提供的所有元数据（标题、作者、年份、期刊/会议、DOI、摘要、关键词、引用数等）\n\n`;
+        }
+        return desc;
     }
 
     getTool(name) {
@@ -43,6 +79,24 @@ class EnhancedToolExecutor {
         return Object.entries(this.tools)
             .map(([name, info]) => `- ${name}: ${info.description}`)
             .join('\n');
+    }
+
+    // 在 EnhancedToolExecutor 类中添加以下方法
+    async _retryAsync(fn, maxRetries = 3, baseDelay = 1000) {
+        let lastError;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                return await fn();
+            } catch (error) {
+                console.warn(`尝试 ${attempt}/${maxRetries} 失败: ${error.message}`);
+                lastError = error;
+                if (attempt === maxRetries) break;
+                // 指数退避 + 随机抖动
+                const delay = baseDelay * Math.pow(2, attempt - 1) + Math.random() * 500;
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+        throw lastError;
     }
 
     async execute(toolName, input, context = {}) {
@@ -77,25 +131,25 @@ class EnhancedToolExecutor {
         this.registerTool(
             'GetPaperDetails',
             '通过DBLP API获取论文详细信息。输入：论文标题字符串，或{"key": "..."}。',
-            async (params) => this.getPaperDetails(params)
+            async (params) => this.getPaperDetails(params), DBLP_PAPER_SCHEMA
         );
 
         this.registerTool(
             'GetAuthorDetails',
             '通过DBLP API获取作者详情。输入：作者姓名字符串，或{"pid": "..."}。',
-            async (params) => this.getAuthorDetails(params)
+            async (params) => this.getAuthorDetails(params), DBLP_AUTHOR_SCHEMA
         );
 
         // —— 补充来源：Semantic Scholar / OpenCitations / CrossRef / OpenAlex ——
         this.registerTool(
-            'GetPaperDetailsSemanticScholar',
-            '通过 Semantic Scholar 获取论文详情（关键词、摘要、引用数、PDF、年份等）。输入：标题字符串，或 { doi }。',
-            async (params) => this.getPaperDetailsSemanticScholar(params)
+            'GetPaperDetailsSemanticScholar', 
+            '通过 Semantic Scholar 获取论文详情（关键词、摘要、引用数、PDF、年份等）。输入：标题字符串，或 { doi }。', 
+            async (params) => this.getPaperDetailsSemanticScholar(params), SEMANTIC_SCHOLAR_PAPER_SCHEMA
         );
         this.registerTool(
             'GetAuthorDetailsSemanticScholar',
             '通过 Semantic Scholar 获取作者信息（别名、单位、主页、hIndex 等）。输入：作者姓名字符串，或 { authorId }。',
-            async (params) => this.getAuthorDetailsSemanticScholar(params)
+            async (params) => this.getAuthorDetailsSemanticScholar(params), SEMANTIC_SCHOLAR_AUTHOR_SCHEMA
         );
         this.registerTool(
             'GetCitationCount',
@@ -105,12 +159,12 @@ class EnhancedToolExecutor {
         this.registerTool(
             'GetWorkCrossRef',
             '通过 CrossRef 获取作品元数据；输入：{ doi }',
-            async (params) => this.getWorkCrossRef(params)
+            async (params) => this.getWorkCrossRef(params), CROSSREF_WORK_SCHEMA
         );
         this.registerTool(
             'GetWorkOpenAlex',
             '通过 OpenAlex 获取作品元数据（含会议信息等）；输入：{ doi }',
-            async (params) => this.getWorkOpenAlex(params)
+            async (params) => this.getWorkOpenAlex(params), OPENALEX_WORK_SCHEMA
         );
 
         this.registerTool(
@@ -293,33 +347,35 @@ class EnhancedToolExecutor {
     // —— Semantic Scholar: 论文详情 —— 
     async getPaperDetailsSemanticScholar(params) {
         try {
-            if (!params) return { success: false, message: '缺少输入' };
-            // 优先通过 DOI 精确获取
-            if (typeof params === 'object' && params.doi) {
-                const doi = params.doi.trim();
-                const fields = [
-                    'title','abstract','year','venue','publicationVenue',
-                    'publicationDate','externalIds','authors','fieldsOfStudy',
-                    'citationCount','openAccessPdf','url'
-                ].join(',');
-                const url = `https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(doi)}?fields=${fields}`;
-                const data = await this._safeFetchJSON(url);
-                return { success: true, data };
+            let args = params;
+            if (typeof params === 'string') {
+                try { args = JSON.parse(params); } catch(e) { args = { title: params }; }
             }
-            // 否则通过标题搜索
-            const title = typeof params === 'string' ? params : params.title || '';
-            const q = title.replace(/^["']|["']$/g, '').trim();
-            if (!q) return { success: false, message: '无效的标题' };
-            const fields = [
-                'title','abstract','year','venue','publicationVenue',
-                'publicationDate','externalIds','authors','fieldsOfStudy',
-                'citationCount','openAccessPdf','url'
-            ].join(',');
-            const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(q)}&fields=${fields}&limit=5`;
-            const data = await this._safeFetchJSON(url);
-            const best = data?.data?.[0];
-            if (!best) return { success: false, message: '未找到匹配论文' };
-            return { success: true, data: best, candidates: data.data };
+            // 解析字段参数，若未指定则使用默认基础字段
+            let fields = args.fields;
+            if (!fields) {
+                fields = ['title', 'authors', 'year', 'venue', 'externalIds', 'url']; // 基础字段
+            }
+            const fieldsParam = Array.isArray(fields) ? fields.join(',') : fields;
+
+            const buildRequest = () => {
+                if (args.doi) {
+                    return { url: `https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(args.doi)}?fields=${fieldsParam}` };
+                } else if (args.paperId) {
+                    return { url: `https://api.semanticscholar.org/graph/v1/paper/${encodeURIComponent(args.paperId)}?fields=${fieldsParam}` };
+                } else if (args.arxivId) {
+                    return { url: `https://api.semanticscholar.org/graph/v1/paper/arXiv:${encodeURIComponent(args.arxivId)}?fields=${fieldsParam}` };
+                } else if (args.title || args.query) {
+                    const query = args.title || args.query;
+                    const limit = args.limit || 5;
+                    return { url: `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(query)}&limit=${limit}&fields=${fieldsParam}` };
+                } else {
+                    throw new Error('缺少有效查询参数');
+                }
+            };
+            const { url } = buildRequest();
+            const data = await this._retryAsync(() => this._safeFetchJSON(url), 3);
+            return { success: true, data };
         } catch (e) {
             return { success: false, message: `Semantic Scholar 查询失败: ${e.message}` };
         }
@@ -328,21 +384,36 @@ class EnhancedToolExecutor {
     // —— Semantic Scholar: 作者详情 —— 
     async getAuthorDetailsSemanticScholar(params) {
         try {
-            if (!params) return { success: false, message: '缺少输入' };
-            if (typeof params === 'object' && params.authorId) {
-                const fields = ['name','aliases','affiliations','homepage','hIndex','paperCount'].join(',');
-                const url = `https://api.semanticscholar.org/graph/v1/author/${encodeURIComponent(params.authorId)}?fields=${fields}`;
+            // 解析参数
+            let args = params;
+            if (typeof params === 'string') {
+                try {
+                    args = JSON.parse(params);
+                } catch(e) {
+                    args = { name: params };
+                }
+            }
+
+            // 按 authorId 获取
+            if (args.authorId) {
+                const fields = args.fields ? args.fields.join(',') : 'name,aliases,affiliations,homepage,hIndex,paperCount';
+                const url = `https://api.semanticscholar.org/graph/v1/author/${encodeURIComponent(args.authorId)}?fields=${fields}`;
                 const data = await this._safeFetchJSON(url);
                 return { success: true, data };
             }
-            const name = (typeof params === 'string' ? params : params.name || '').trim();
-            if (!name) return { success: false, message: '无效的作者名' };
-            const fields = ['name','aliases','affiliations','homepage','hIndex','paperCount'].join(',');
-            const url = `https://api.semanticscholar.org/graph/v1/author/search?query=${encodeURIComponent(name)}&fields=${fields}&limit=5`;
-            const data = await this._safeFetchJSON(url);
-            const best = data?.data?.[0];
-            if (!best) return { success: false, message: '未找到匹配作者' };
-            return { success: true, data: best, candidates: data.data };
+            // 按名称搜索
+            else if (args.name || args.query) {
+                const query = args.name || args.query;
+                const limit = args.limit || 5;
+                const fields = args.fields ? args.fields.join(',') : 'name,aliases,affiliations,homepage,hIndex,paperCount';
+                const url = `https://api.semanticscholar.org/graph/v1/author/search?query=${encodeURIComponent(query)}&limit=${limit}&fields=${fields}`;
+                const data = await this._safeFetchJSON(url);
+                const best = data?.data?.[0];
+                if (!best) return { success: false, message: '未找到匹配作者' };
+                return { success: true, data: best, candidates: data.data };
+            } else {
+                return { success: false, message: '缺少有效查询参数' };
+            }
         } catch (e) {
             return { success: false, message: `Semantic Scholar 作者查询失败: ${e.message}` };
         }
@@ -359,7 +430,7 @@ class EnhancedToolExecutor {
                 const token = (window?.localStorage?.getItem('opencitations_token') || '').trim();
                 const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
                 const url = `https://opencitations.net/api/v1/citations/${encodeURIComponent(doi)}`;
-                const data = await this._safeFetchJSON(url, { headers });
+                const data = await this._retryAsync(() => this._safeFetchJSON(url, { headers }), 3);
                 const count = Array.isArray(data) ? data.length : (data?.length || 0);
                 if (Number.isFinite(count)) {
                     return { success: true, data: { citationCount: count, source: 'OpenCitations' } };
@@ -372,7 +443,7 @@ class EnhancedToolExecutor {
             try {
                 const fields = 'citationCount';
                 const url = `https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(doi)}?fields=${fields}`;
-                const data = await this._safeFetchJSON(url);
+                const data = await this._retryAsync(() => this._safeFetchJSON(url), 3);
                 if (typeof data?.citationCount === 'number') {
                     return { success: true, data: { citationCount: data.citationCount, source: 'SemanticScholar' } };
                 }
@@ -387,11 +458,42 @@ class EnhancedToolExecutor {
     // —— CrossRef: 作品元数据 —— 
     async getWorkCrossRef(params) {
         try {
-            if (!params || !params.doi) return { success: false, message: '需要 { doi }' };
-            const url = `https://api.crossref.org/works/${encodeURIComponent(params.doi)}`;
-            const data = await this._safeFetchJSON(url);
-            const message = data?.message || data;
-            return { success: true, data: message };
+            let args = params;
+            if (typeof params === 'string') {
+                try {
+                    args = JSON.parse(params);
+                } catch(e) {
+                    args = { doi: params };
+                }
+            }
+            // 默认 select 基础字段
+            let select = args.select;
+            if (!select) {
+                select = ['DOI', 'title', 'author', 'container-title', 'issued', 'page'];
+            }
+            const selectParam = Array.isArray(select) ? select.join(',') : select;
+
+            if (args.doi) {
+                const url = `https://api.crossref.org/works/${encodeURIComponent(args.doi)}?select=${selectParam}`;
+                const data = await this._retryAsync(() => this._safeFetchJSON(url), 3);
+                return { success: true, data: data.message };
+            } else if (args.query) {
+                let url = `https://api.crossref.org/works?query=${encodeURIComponent(args.query)}&select=${selectParam}`;
+                if (args.rows) url += `&rows=${args.rows}`;
+                if (args.offset) url += `&offset=${args.offset}`;
+                if (args.sort) url += `&sort=${args.sort}`;
+                if (args.order) url += `&order=${args.order}`;
+                if (args.filter) {
+                    const filterStr = Object.entries(args.filter)
+                        .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+                        .join(',');
+                    if (filterStr) url += `&filter=${filterStr}`;
+                }
+                const data = await this._retryAsync(() => this._safeFetchJSON(url), 3);
+                return { success: true, data: data.message };
+            } else {
+                return { success: false, message: '缺少有效查询参数' };
+            }
         } catch (e) {
             return { success: false, message: `CrossRef 查询失败: ${e.message}` };
         }
@@ -400,10 +502,41 @@ class EnhancedToolExecutor {
     // —— OpenAlex: 作品元数据 —— 
     async getWorkOpenAlex(params) {
         try {
-            if (!params || !params.doi) return { success: false, message: '需要 { doi }' };
-            const url = `https://api.openalex.org/works/https://doi.org/${encodeURIComponent(params.doi)}`;
-            const data = await this._safeFetchJSON(url);
-            return { success: true, data };
+            let args = params;
+            if (typeof params === 'string') {
+                try {
+                    args = JSON.parse(params);
+                } catch(e) {
+                    args = { doi: params };
+                }
+            }
+            let select = args.select || args.fields;
+            if (!select) {
+                select = ['title', 'authorships', 'publication_year', 'doi', 'id', 'primary_location'];
+            }
+            const selectParam = Array.isArray(select) ? select.join(',') : select;
+
+            if (args.doi) {
+                const url = `https://api.openalex.org/works/https://doi.org/${encodeURIComponent(args.doi)}?select=${selectParam}`;
+                const data = await this._retryAsync(() => this._safeFetchJSON(url), 3);
+                return { success: true, data };
+            } else if (args.openalex_id) {
+                const url = `https://api.openalex.org/works/${encodeURIComponent(args.openalex_id)}?select=${selectParam}`;
+                const data = await this._retryAsync(() => this._safeFetchJSON(url), 3);
+                return { success: true, data };
+            } else if (args.title || args.query) {
+                let url = `https://api.openalex.org/works?search=${encodeURIComponent(args.title || args.query)}&select=${selectParam}`;
+                if (args.filter) url += `&filter=${encodeURIComponent(args.filter)}`;
+                if (args['per-page']) url += `&per-page=${args['per-page']}`;
+                if (args.page) url += `&page=${args.page}`;
+                if (args.sort) url += `&sort=${encodeURIComponent(args.sort)}`;
+                const data = await this._retryAsync(() => this._safeFetchJSON(url), 3);
+                const best = data?.results?.[0];
+                if (!best) return { success: false, message: '未找到匹配作品' };
+                return { success: true, data: best, candidates: data.results };
+            } else {
+                return { success: false, message: '缺少有效查询参数' };
+            }
         } catch (e) {
             return { success: false, message: `OpenAlex 查询失败: ${e.message}` };
         }
@@ -411,39 +544,54 @@ class EnhancedToolExecutor {
 
     async getPaperDetails(params) {
         try {
-            if (!params) {
-                return { success: false, message: '缺少输入' };
+            let args = params;
+            if (typeof params === 'string') {
+                try {
+                    args = JSON.parse(params);
+                } catch(e) {
+                    args = { title: params };
+                }
             }
-            if (typeof params === 'object' && params.key) {
-                const detail = await getPublicationByKey(params.key);
+
+            // 按 key 获取单篇
+            if (args.key) {
+                const detail = await getPublicationByKey(args.key);
                 return { success: true, data: detail };
             }
-            let query = typeof params === 'string' ? params : params.title || '';
-            query = query.replace(/^["']|["']$/g, '').trim();
-            if (!query) {
-                return { success: false, message: '无效的查询' };
+            // 按标题/作者/年份等组合搜索
+            else if (args.title || args.query) {
+                let query = args.title || args.query;
+                if (args.author) query += ` author:"${args.author}"`;
+                if (args.venue) query += ` venue:"${args.venue}"`;
+                if (args.year) query += ` year:${args.year}`;
+                const h = args.h || args.limit || 10;
+                const f = args.f || args.offset || 0;
+                const url = `${APIS.DBLP.SEARCH_PUBL}?q=${encodeURIComponent(query)}&h=${h}&f=${f}&format=json`;
+                const data = await fetchWithRetry(url, 'DBLP');
+                const hits = data.result?.hits?.hit || [];
+                if (!hits.length) return { success: false, message: '未找到匹配论文' };
+                const hit = hits[0];
+                const info = hit.info;
+                const authors = info.authors?.author ? (Array.isArray(info.authors.author) ? info.authors.author.map(a => a.text || a) : [info.authors.author.text || info.authors.author]) : [];
+                const paper = {
+                    title: info.title,
+                    authors,
+                    venue: info.venue,
+                    year: info.year,
+                    type: info.type,
+                    key: info.key,
+                    doi: info.doi,
+                    url: info.url,
+                    ee: info.ee
+                };
+                if (paper.key) {
+                    const detail = await getPublicationByKey(paper.key);
+                    Object.assign(paper, detail);
+                }
+                return { success: true, data: paper, candidates: hits.slice(0, 5).map(h => h.info) };
+            } else {
+                return { success: false, message: '缺少有效查询参数' };
             }
-            const list = await searchPublications(query);
-            if (!list || list.length === 0) {
-                return { success: false, message: '未找到匹配的论文' };
-            }
-            const candidate = list[0];
-            let detail = null;
-            if (candidate.key) {
-                detail = await getPublicationByKey(candidate.key);
-            }
-            const merged = {
-                title: candidate.title || detail?.title || '',
-                authors: candidate.authors || detail?.authors || [],
-                year: candidate.year || detail?.year || '',
-                venue: candidate.venue || detail?.venue || '',
-                doi: candidate.doi || detail?.doi || '',
-                ee: candidate.ee || detail?.ee || '',
-                key: candidate.key || detail?.key || '',
-                abstract: detail?.abstract || '',
-                keywords: detail?.keywords || []
-            };
-            return { success: true, data: merged, candidates: list.slice(0, 5) };
         } catch (e) {
             return { success: false, message: `获取论文信息失败: ${e.message}` };
         }
@@ -451,34 +599,36 @@ class EnhancedToolExecutor {
 
     async getAuthorDetails(params) {
         try {
-            if (!params) {
-                return { success: false, message: '缺少输入' };
+            let args = params;
+            if (typeof params === 'string') {
+                try {
+                    args = JSON.parse(params);
+                } catch(e) {
+                    args = { name: params };
+                }
             }
-            if (typeof params === 'object' && params.pid) {
-                const detail = await getAuthorByPid(params.pid);
+
+            if (args.pid) {
+                const detail = await getAuthorByPid(args.pid);
                 return { success: true, data: detail };
+            } else if (args.name) {
+                const list = await searchAuthors(args.name);
+                if (!list || list.length === 0) return { success: false, message: '未找到匹配作者' };
+                const candidate = list[0];
+                const detail = candidate.pid ? await getAuthorByPid(candidate.pid) : null;
+                const merged = {
+                    name: candidate.name || detail?.name || '',
+                    pid: candidate.pid || detail?.pid || '',
+                    url: candidate.url || detail?.url || '',
+                    homepages: detail?.homepages || [],
+                    affiliations: detail?.affiliations || [],
+                    aliases: candidate.aliases || [],
+                    notes: detail?.notes || []
+                };
+                return { success: true, data: merged, candidates: list.slice(0, 5) };
+            } else {
+                return { success: false, message: '缺少有效查询参数' };
             }
-            let name = typeof params === 'string' ? params : params.name || '';
-            name = name.replace(/^["']|["']$/g, '').trim();
-            if (!name) {
-                return { success: false, message: '无效的作者名' };
-            }
-            const list = await searchAuthors(name);
-            if (!list || list.length === 0) {
-                return { success: false, message: '未找到匹配的作者' };
-            }
-            const candidate = list[0];
-            const detail = candidate.pid ? await getAuthorByPid(candidate.pid) : null;
-            const merged = {
-                name: candidate.name || detail?.name || '',
-                pid: candidate.pid || detail?.pid || '',
-                url: candidate.url || detail?.url || '',
-                homepages: detail?.homepages || [],
-                affiliations: detail?.affiliations || [],
-                aliases: candidate.aliases || [],
-                notes: detail?.notes || []
-            };
-            return { success: true, data: merged, candidates: list.slice(0, 5) };
         } catch (e) {
             return { success: false, message: `获取作者信息失败: ${e.message}` };
         }

@@ -2,7 +2,7 @@
 // 统一的学术 API 客户端，管理多数据源 (DBLP, Semantic Scholar, Crossref, OpenAlex)
 
 // API 基础配置
-const APIS = {
+export const APIS = {
     DBLP: {
         SEARCH_PUBL: 'https://dblp.org/search/publ/api',
         SEARCH_AUTHOR: 'https://dblp.org/search/author/api',
@@ -63,7 +63,7 @@ const setBackoff = (source, ms) => {
     }
 };
 
-const normalizeDoi = (doi) => {
+export const normalizeDoi = (doi) => {
     if (!doi) return '';
     const d = String(doi).trim();
     return d.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').trim();
@@ -313,7 +313,7 @@ const requestTimestamps = {
 };
 
 // 通用 Fetch 包装器（带频率限制和重试）
-async function fetchWithRetry(url, source, retries = 3, initialDelay = 1000) {
+export async function fetchWithRetry(url, source, retries = 3, initialDelay = 1000) {
     let lastError;
     const config = APIS[source];
     
@@ -562,11 +562,12 @@ async function getSemanticScholarPublications(authorId, offset, limit) {
     };
 }
 
-async function searchSemanticScholarPapers(query, offset, limit) {
-    const fields = 'title,authors,year,venue,externalIds,url,abstract,citationCount,publicationDate,isOpenAccess,openAccessPdf,fieldsOfStudy,s2FieldsOfStudy';
+async function searchSemanticScholarPapers(query, offset, limit, fields = null) {
+    const defaultFields = 'title,authors,year,venue,externalIds,url';
+    const fieldParam = fields ? fields : defaultFields;
     const safeLimit = clampInt(limit, 1, 100, 10);
     const safeOffset = clampInt(offset, 0, 1000000, 0);
-    const url = `${APIS.SEMANTIC_SCHOLAR.SEARCH}?query=${encodeURIComponent(query)}&offset=${safeOffset}&limit=${safeLimit}&fields=${fields}`;
+    const url = `${APIS.SEMANTIC_SCHOLAR.SEARCH}?query=${encodeURIComponent(query)}&offset=${safeOffset}&limit=${safeLimit}&fields=${fieldParam}`;
     const data = await fetchWithRetry(url, 'SEMANTIC_SCHOLAR');
     
     return {
@@ -596,8 +597,9 @@ async function searchCrossrefPapers(query, offset, limit, filters = {}) {
     // Crossref 支持 query.affiliation, query.container-title, filter=from-pub-date
     const safeRows = clampInt(limit, 1, 1000, 10);
     const safeOffset = clampInt(offset, 0, 1000000, 0);
-    let url = `${APIS.CROSSREF.WORKS}?query=${encodeURIComponent(query)}&rows=${safeRows}&offset=${safeOffset}&sort=relevance&select=title,author,published-print,published-online,issued,container-title,DOI,URL,abstract,subject,page,language`;
-    
+    const defaultSelect = 'title,author,container-title,DOI,URL,published-print,published-online,issued,page';
+    const selectParam = select ? select : defaultSelect;
+    let url = `${APIS.CROSSREF.WORKS}?query=${encodeURIComponent(query)}&rows=${safeRows}&offset=${safeOffset}&sort=relevance&select=${selectParam}`;
     // 添加高级过滤参数
     if (filters.affiliation) {
         url += `&query.affiliation=${encodeURIComponent(filters.affiliation)}`;
@@ -641,7 +643,9 @@ async function searchOpenAlexPapers(query, offset, limit) {
     const safeLimit = clampInt(limit, 1, 200, 25);
     const safeOffset = clampInt(offset, 0, 1000000, 0);
     const page = Math.floor(safeOffset / safeLimit) + 1;
-    const url = `${APIS.OPENALEX.WORKS}?search=${encodeURIComponent(query)}&page=${page}&per-page=${safeLimit}&select=title,authorships,primary_location,publication_year,publication_date,language,doi,id,cited_by_count,abstract_inverted_index,grants,biblio`;
+    const defaultSelect = 'title,authorships,primary_location,publication_year,doi,id';
+    const selectParam = select ? select : defaultSelect;
+    const url = `${APIS.OPENALEX.WORKS}?search=${encodeURIComponent(query)}&page=${page}&per-page=${safeLimit}&select=${selectParam}`;
     const data = await fetchWithRetry(url, 'OPENALEX');
     
     return {
@@ -752,11 +756,13 @@ async function getAllOpenAlexAuthorPublications(authorId, pageSize = 200) {
     return { total: total || all.length, source: 'OpenAlex', items: all };
 }
 
-async function getSemanticScholarPaperByDoi(doi) {
+async function getSemanticScholarPaperByDoi(doi, fields = null) {
     const d = normalizeDoi(doi);
     if (!d) throw new Error('DOI 为空');
-    const fields = 'title,authors,year,venue,externalIds,url,abstract,citationCount,publicationDate,isOpenAccess,openAccessPdf,fieldsOfStudy,s2FieldsOfStudy';
-    const url = `https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(d)}?fields=${fields}`;
+    // 默认基础字段（标题、作者、年份、期刊/会议、DOI、URL）
+    const defaultFields = 'title,authors,year,venue,externalIds,url';
+    const fieldParam = fields ? fields : defaultFields;
+    const url = `https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(d)}?fields=${fieldParam}`;
     const item = await fetchWithRetry(url, 'SEMANTIC_SCHOLAR');
     return {
         title: item.title,
@@ -766,6 +772,7 @@ async function getSemanticScholarPaperByDoi(doi) {
         doi: normalizeDoi(item.externalIds?.DOI || d),
         url: item.url,
         source: 'Semantic Scholar',
+        // 以下字段可能因 fields 而缺失
         abstract: item.abstract,
         keywords: extractSemanticScholarKeywords(item),
         citationCount: item.citationCount,
@@ -775,22 +782,26 @@ async function getSemanticScholarPaperByDoi(doi) {
     };
 }
 
-async function getCrossrefPaperByDoi(doi) {
+async function getCrossrefPaperByDoi(doi, select = null) {
     const d = normalizeDoi(doi);
     if (!d) throw new Error('DOI 为空');
-    const url = `${APIS.CROSSREF.WORKS}/${encodeURIComponent(d)}`;
+    let url = `${APIS.CROSSREF.WORKS}/${encodeURIComponent(d)}`;
+    if (select) {
+        url += `?select=${select}`;
+    }
     const data = await fetchWithRetry(url, 'CROSSREF');
     const item = data.message;
-    const event = item.event || null;
-    const organizers = Array.isArray(item.editor) ? item.editor.map(normalizePersonName).filter(Boolean) : [];
-    const articleNumber = extractCrossrefArticleNumber(item);
+
+    // 解析日期、页码等通用字段（这些函数不依赖 select，因为它们是基于 item 的计算）
+    const pubParts = extractCrossrefPublicationParts(item);
     const pages = extractCrossrefPages(item);
-    const pub = extractCrossrefPublicationParts(item);
-    const confDates = extractCrossrefEventDateParts(event);
+    const confDates = extractCrossrefEventDateParts(item.event || null);
+    const articleNumber = extractCrossrefArticleNumber(item);
+    const organizers = Array.isArray(item.editor) ? item.editor.map(normalizePersonName).filter(Boolean) : [];
+
+    // 构建返回对象，只包含我们需要的字段（如果 select 限制了字段，这些字段可能为空，但没关系）
     return {
-        ...pub,
-        ...pages,
-        ...confDates,
+        // 基础字段（总是返回，因为这些是默认需要的）
         title: item.title?.[0] || '',
         authors: item.author ? item.author.map(a => `${a.given} ${a.family}`.trim()) : [],
         venue: item['container-title']?.[0] || '',
@@ -798,15 +809,19 @@ async function getCrossrefPaperByDoi(doi) {
         doi: normalizeDoi(item.DOI || d),
         url: item.URL,
         source: 'Crossref',
+        // 以下字段可能因 select 而缺失，但函数仍然会尝试填充（如果服务器返回了，就有值；否则为默认值）
         abstract: item.abstract || '',
         language: normalizeLanguageCode(item.language),
         keywords: normalizeKeywords(item.subject),
         publisher: item.publisher || '',
         articleNumber: articleNumber,
-        conferenceName: event?.name || '',
-        conferenceLocation: event?.location || '',
-        conferenceEvent: event || null,
-        organizers
+        conferenceName: item.event?.name || '',
+        conferenceLocation: item.event?.location || '',
+        conferenceEvent: item.event || null,
+        organizers: organizers,
+        ...pubParts,
+        ...pages,
+        ...confDates,
     };
 }
 
@@ -996,29 +1011,41 @@ export async function searchConferenceOrganizers(conferenceName, year) {
     return { success: false, organizers: [] };
 }
 
-async function getOpenAlexPaperByDoi(doi) {
+async function getOpenAlexPaperByDoi(doi, select = null) {
     const d = normalizeDoi(doi);
     if (!d) throw new Error('DOI 为空');
     const filter = `doi:https://doi.org/${d}`;
-    const url = `${APIS.OPENALEX.WORKS}?filter=${encodeURIComponent(filter)}&per-page=1&select=title,authorships,primary_location,publication_year,publication_date,language,doi,id,cited_by_count,abstract_inverted_index,grants,biblio`;
+    let url = `${APIS.OPENALEX.WORKS}?filter=${encodeURIComponent(filter)}&per-page=1`;
+    if (select) {
+        url += `&select=${select}`;
+    } else {
+        // 默认基础字段
+        url += '&select=title,authorships,primary_location,publication_year,doi,id';
+    }
     const data = await fetchWithRetry(url, 'OPENALEX');
     const item = data.results?.[0];
     if (!item) throw new Error('OpenAlex 未找到该 DOI');
     return {
-        ...extractOpenAlexPublicationParts(item),
-        ...extractOpenAlexPages(item),
+        // 基础字段（总是返回）
         title: item.title,
         authors: (item.authorships || []).map(a => a.author?.display_name).filter(Boolean),
         venue: item.primary_location?.source?.display_name || '',
         year: item.publication_year ? String(item.publication_year) : '',
-        language: normalizeLanguageCode(item.language),
         doi: normalizeDoi(item.doi || d),
         url: item.doi || item.id,
         source: 'OpenAlex',
+        // 以下字段可能因 select 而缺失
         citationCount: item.cited_by_count,
         abstract: openAlexInvertedIndexToText(item.abstract_inverted_index),
         grants: Array.isArray(item.grants) ? item.grants : [],
         articleNumber: extractOpenAlexArticleNumber(item),
+        language: normalizeLanguageCode(item.language),
+        publicationDate: item.publication_date,
+        publicationMonth: item.publication_date ? item.publication_date.split('-')[1] : '',
+        publicationDay: item.publication_date ? item.publication_date.split('-')[2] : '',
+        firstPage: item.biblio?.first_page || '',
+        lastPage: item.biblio?.last_page || '',
+        pageRange: item.biblio?.first_page && item.biblio?.last_page ? `${item.biblio.first_page}-${item.biblio.last_page}` : '',
         keywords: []
     };
 }
@@ -1041,37 +1068,37 @@ export async function getPaperByDOI(doi) {
     return { success: false, message: '未找到该 DOI 的论文详情' };
 }
 
-export async function getPaperByDOIAllSources(doi) {
+export async function getPaperByDOIAllSources(doi, options = {}) {
     const d = normalizeDoi(doi);
     if (!d) return { success: false, message: 'DOI 为空' };
 
     const out = { success: false, doi: d, sources: {} };
-    const tasks = [];
+    const neededFields = options.fields || ['title', 'authors', 'venue', 'year', 'doi', 'url']; // 默认基础字段
+    const wait = (ms) => new Promise(r => setTimeout(r, ms));
 
-    tasks.push((async () => {
+    // 按优先级串行请求：OpenAlex（限流宽松） -> Semantic Scholar（可能有限流） -> CrossRef
+    try {
+        const paper = await getOpenAlexPaperByDoi(d, neededFields);
+        out.sources.openalex = paper;
+        out.success = true;
+        await wait(500); // 请求间隔
+    } catch (e) {}
+    if (!out.success) {
         try {
-            const paper = await getCrossrefPaperByDoi(d);
-            out.sources.crossref = paper;
-        } catch (e) {}
-    })());
-
-    tasks.push((async () => {
-        try {
-            const paper = await getOpenAlexPaperByDoi(d);
-            out.sources.openalex = paper;
-        } catch (e) {}
-    })());
-
-    tasks.push((async () => {
-        try {
-            if (isInBackoff('SEMANTIC_SCHOLAR')) return;
-            const paper = await getSemanticScholarPaperByDoi(d);
+            const paper = await getSemanticScholarPaperByDoi(d, neededFields);
             out.sources.semanticScholar = paper;
+            out.success = true;
+            await wait(500);
         } catch (e) {}
-    })());
+    }
+    if (!out.success) {
+        try {
+            const paper = await getCrossrefPaperByDoi(d, neededFields);
+            out.sources.crossref = paper;
+            out.success = true;
+        } catch (e) {}
+    }
 
-    await Promise.allSettled(tasks);
-    out.success = Object.keys(out.sources).length > 0;
     if (!out.success) out.message = '未找到该 DOI 的论文详情';
     return out;
 }
@@ -1226,3 +1253,5 @@ export async function unifiedGetPublications(author, offset = 0, limit = 10, fil
 
     return { total: 0, items: [], error: '未找到相关论文' };
 }
+
+export { getSemanticScholarPaperByDoi, getCrossrefPaperByDoi, getOpenAlexPaperByDoi };

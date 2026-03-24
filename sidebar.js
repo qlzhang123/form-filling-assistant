@@ -7,8 +7,8 @@ import { ToolExecutor, ReActAgent } from './js/react_agent.js';
 import { FormFillingAgent } from './js/form_agent.js';
 import { EnhancedToolExecutor } from './js/tool_executor.js';
 import { FormParser } from './js/form_parser.js';
-import { unifiedSearchAuthors, unifiedGetPublications, getPaperByDOI, getPaperByDOIAllSources, unifiedSearchPapers , searchConferenceEventDate } from './js/api_client.js';
-
+import { unifiedSearchAuthors, unifiedGetPublications, getPaperByDOI, getPaperByDOIAllSources, unifiedSearchPapers, searchConferenceEventDate } from './js/api_client.js';
+import { getSemanticScholarPaperByDoi, getCrossrefPaperByDoi, getOpenAlexPaperByDoi } from './js/api_client.js';
 class FormFillingSidebar {
     constructor() {
         this.fillHistory = [];
@@ -151,12 +151,29 @@ class FormFillingSidebar {
         this.venueAliasOverrides = safeParse(localStorage.getItem('venue_alias_overrides') || '{}');
         this.ccfRatingOverrides = safeParse(localStorage.getItem('ccf_rating_overrides') || '{}');
 
-        const urlAliases = (chrome?.runtime?.getURL ? chrome.runtime.getURL('data/conference_aliases.json') : './data/conference_aliases.json');
-        const urlCcf = (chrome?.runtime?.getURL ? chrome.runtime.getURL('data/ccf_ratings.json') : './data/ccf_ratings.json');
+        // 获取文件 URL，如果 chrome.runtime 不可用（如测试环境），则使用相对路径
+        const urlAliases = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL)
+            ? chrome.runtime.getURL('data/conference_aliases.json')
+            : './data/conference_aliases.json';
+        const urlCcf = (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL)
+            ? chrome.runtime.getURL('data/ccf_ratings.json')
+            : './data/ccf_ratings.json';
+
+        // 加载 JSON，失败时返回空对象
+        const loadJson = async (url) => {
+            try {
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                return await response.json();
+            } catch (e) {
+                console.warn(`无法加载 ${url}:`, e);
+                return {};
+            }
+        };
 
         const [aliasesRes, ccfRes] = await Promise.all([
-            fetch(urlAliases).then(r => r.ok ? r.json() : {}).catch(() => ({})),
-            fetch(urlCcf).then(r => r.ok ? r.json() : {}).catch(() => ({}))
+            loadJson(urlAliases),
+            loadJson(urlCcf)
         ]);
 
         const mergedAliases = { ...(aliasesRes || {}), ...(this.venueAliasOverrides || {}) };
@@ -548,19 +565,17 @@ class FormFillingSidebar {
 
     async parseCurrentForm() {
         const url = this.formUrlInput.value.trim();
-        
         if (!url) {
             this.setStatus('请输入表单URL', 'warning');
             return;
         }
-        
         this.currentFormUrl = url;
         this.setStatus('正在获取页面内容...', 'searching');
         
         try {
-            // 1. 获取页面 HTML（通过 background -> content script）
+            // 1. 获取页面 HTML
             const response = await this.sendMessageToBackground({
-                action: 'parseForm', // background 将此转换为 getPageContent
+                action: 'parseForm',
                 data: { url: url }
             });
             
@@ -569,32 +584,21 @@ class FormFillingSidebar {
                 return;
             }
 
-            // 保存标签页ID
             this.formTabId = response.tabId;
             if (this.backToFormBtn) this.backToFormBtn.style.display = 'block';
 
-            // 2. 在 Sidebar 中实例化 FormParser 和 LLM
             this.setStatus('正在智能解析表单结构...', 'ai-thinking');
             
-            // 创建一个临时的 DOMParser 来解析 HTML 字符串
             const domParser = new DOMParser();
             const doc = domParser.parseFromString(response.content, 'text/html');
-            
-            // 初始化 FormParser 并注入文档对象
             const parser = new FormParser();
             parser.document = doc; 
-
-            // 初始化 LLM 客户端
             const llmClient = new DeepSeekLLM(this.aiSettings.apiKey, this.aiSettings.model);
             
-            // 3. 调用 LLM 增强解析
             console.log("🤖 正在使用 LLM 分析表单结构...");
             const llmStructure = await parser.analyzeFormStructureViaLLM(llmClient);
-            
-            // 4. 获取最终结构（结合规则 + LLM）
             const formStructure = parser.getFormStructure();
             
-            // 如果 LLM 返回了有效结构，进行合并/修正
             if (llmStructure && Array.isArray(llmStructure) && llmStructure.length > 0) {
                 console.log("✅ LLM 成功分析出表单结构，正在合并...", llmStructure);
                 formStructure.fields = formStructure.fields.map(field => {
@@ -603,26 +607,32 @@ class FormFillingSidebar {
                         (l.label && field.label && l.label.includes(field.label))
                     );
                     if (match) {
-                        return { ...field, category: match.category, label: match.label, type: match.type };
+                        return { 
+                            ...field, 
+                            category: match.category, 
+                            label: match.label, 
+                            type: match.type,
+                            format_hint: match.format_hint || field.format_hint
+                        };
                     }
                     return field;
                 });
-                
-                // 还可以考虑添加 LLM 发现但规则漏掉的字段（需谨慎去重）
             }
 
-            // 5. 更新 UI
             this.currentFormFields = formStructure.fields;
+            
+            // ========== 新增：初始化 requiredPaperFields ==========
             this.requiredPaperFields = this.deriveRequiredPaperFields(this.currentFormFields);
+            // ====================================================
+            
             this.renderFormFields(this.currentFormFields);
             
             const fieldCount = this.currentFormFields.length;
             if (fieldCount > 0) {
                 this.resetToStartPage();
                 this.setStatus(`成功解析 ${fieldCount} 个字段，请选择论文`, 'success');
-                // 解析成功后，不直接开始填表，而是显示作者搜索
                 this.authorSearchArea.style.display = 'block';
-                this.fillingProgress.style.display = 'none'; // 暂时隐藏进度条
+                this.fillingProgress.style.display = 'none';
                 this.fillingControls.style.display = 'none';
                 this.fillingStats.style.display = 'none';
                 this.updateStats();
@@ -1251,130 +1261,111 @@ class FormFillingSidebar {
         if (doi) {
             const merged = { ...(this.selectedPaper || {}) };
             try {
-                const all = await getPaperByDOIAllSources(doi);
-                const s2 = all.sources?.semanticScholar || null;
-                const crossref = all.sources?.crossref || null;
-                const openalex = all.sources?.openalex || null;
-                const kwSet = new Set();
-                const pushKeywords = (kws) => {
-                    if (!kws) return;
-                    const arr = Array.isArray(kws) ? kws : [kws];
-                    for (const v of arr) {
-                        if (v == null) continue;
-                        if (typeof v === 'string') {
-                            v.split(/[;,，；\n\t]+/).map(s => s.trim()).filter(Boolean).forEach(x => kwSet.add(x));
-                        } else if (typeof v === 'object') {
-                            const name = v.name || v.category || v.display_name || v.value;
-                            if (name) kwSet.add(String(name).trim());
-                        } else {
-                            kwSet.add(String(v).trim());
-                        }
-                    }
-                };
-                pushKeywords(merged.keywords);
+                // 基础字段（总是需要的）
+                const baseFields = ['title', 'authors', 'year', 'venue', 'doi', 'url'];
                 
-                if (crossref) {
-                    merged.conferenceName = crossref.conferenceName || merged.conferenceName || '';
-                    merged.conferenceLocation = crossref.conferenceLocation || merged.conferenceLocation || '';
-                    merged.conferenceEvent = crossref.conferenceEvent || merged.conferenceEvent || null;
-                    merged.articleNumber = crossref.articleNumber || merged.articleNumber || '';
-                    merged.firstPage = merged.firstPage || crossref.firstPage || '';
-                    merged.lastPage = merged.lastPage || crossref.lastPage || '';
-                    merged.pageRange = merged.pageRange || crossref.pageRange || '';
-                    merged.publicationDate = merged.publicationDate || crossref.publicationDate || '';
-                    merged.publicationMonth = merged.publicationMonth || crossref.publicationMonth || '';
-                    merged.publicationDay = merged.publicationDay || crossref.publicationDay || '';
-                    merged.conferenceEventDate = merged.conferenceEventDate || crossref.conferenceEventDate || '';
-                    merged.conferenceStartDate = merged.conferenceStartDate || crossref.conferenceStartDate || '';
-                    merged.conferenceEndDate = merged.conferenceEndDate || crossref.conferenceEndDate || '';
-                    merged.conferenceStartMonth = merged.conferenceStartMonth || crossref.conferenceStartMonth || '';
-                    merged.conferenceStartDay = merged.conferenceStartDay || crossref.conferenceStartDay || '';
-                    merged.conferenceEndMonth = merged.conferenceEndMonth || crossref.conferenceEndMonth || '';
-                    merged.conferenceEndDay = merged.conferenceEndDay || crossref.conferenceEndDay || '';
-                    merged.language = merged.language || crossref.language || '';
-                    if (Array.isArray(crossref.organizers) && crossref.organizers.length) merged.organizers = crossref.organizers;
-                    pushKeywords(crossref.keywords);
-                }
-                if (openalex) {
-                    if (merged.citationCount == null && openalex.citationCount != null) merged.citationCount = openalex.citationCount;
-                    if (!merged.abstract && openalex.abstract) merged.abstract = openalex.abstract;
-                    if ((!merged.grants || (Array.isArray(merged.grants) && merged.grants.length === 0)) && openalex.grants) merged.grants = openalex.grants;
-                    merged.articleNumber = merged.articleNumber || openalex.articleNumber || '';
-                    merged.firstPage = merged.firstPage || openalex.firstPage || '';
-                    merged.lastPage = merged.lastPage || openalex.lastPage || '';
-                    merged.pageRange = merged.pageRange || openalex.pageRange || '';
-                    merged.publicationDate = merged.publicationDate || openalex.publicationDate || '';
-                    merged.publicationMonth = merged.publicationMonth || openalex.publicationMonth || '';
-                    merged.publicationDay = merged.publicationDay || openalex.publicationDay || '';
-                    merged.language = merged.language || openalex.language || '';
-                    pushKeywords(openalex.keywords);
-                }
-                if (s2) {
-                    if (!merged.abstract && s2.abstract) merged.abstract = s2.abstract;
-                    if (merged.citationCount == null && s2.citationCount != null) merged.citationCount = s2.citationCount;
-                    if (!merged.openAccessPdf && s2.openAccessPdf) merged.openAccessPdf = s2.openAccessPdf;
-                    if (!merged.publicationDate && s2.publicationDate) merged.publicationDate = s2.publicationDate;
-                    pushKeywords(s2.keywords);
-                }
-                if (!merged.language && merged.title) {
-                    merged.language = this.guessLanguageFromTitle(merged.title);
-                }
-                merged.keywords = Array.from(kwSet).filter(Boolean);
-                if (merged.venue && merged.year) {
-                try {
-                    const confDateResult = await searchConferenceEventDate(merged.venue, merged.year);
-                    if (confDateResult.success && confDateResult.data) {
-                        merged.conferenceEventDate = confDateResult.data.conferenceEventDate || '';
-                        merged.conferenceStartDate = confDateResult.data.conferenceStartDate || '';
-                        merged.conferenceEndDate = confDateResult.data.conferenceEndDate || '';
-                        merged.conferenceStartYear = confDateResult.data.conferenceStartYear || '';
-                        merged.conferenceStartMonth = confDateResult.data.conferenceStartMonth || '';
-                        merged.conferenceStartDay = confDateResult.data.conferenceStartDay || '';
-                        merged.conferenceEndYear = confDateResult.data.conferenceEndYear || '';
-                        merged.conferenceEndMonth = confDateResult.data.conferenceEndMonth || '';
-                        merged.conferenceEndDay = confDateResult.data.conferenceEndDay || '';
-
-                        // 存入发现缓存（供后续字段使用）
-                        if (this.formFillingAgent && this.formFillingAgent.discoveryCache) {
-                            const cacheKey = `_conference_event_date_${merged.venue}_${merged.year}`;
-                            this.formFillingAgent.discoveryCache[cacheKey] = confDateResult.data;
-                        }
+                // 根据表单需求动态决定是否需要额外字段
+                const needAbstract = this.requiredPaperFields.includes('abstract');
+                const needKeywords = this.requiredPaperFields.includes('keywords');
+                const needCitation = this.requiredPaperFields.includes('citationCount');
+                const needGrants = this.requiredPaperFields.includes('grants');
+                
+                // 构建各个API的 select/fields 参数
+                let selectOpenAlex = [...baseFields];
+                if (needAbstract) selectOpenAlex.push('abstract_inverted_index');
+                if (needKeywords) selectOpenAlex.push('keywords');
+                if (needCitation) selectOpenAlex.push('cited_by_count');
+                if (needGrants) selectOpenAlex.push('grants');
+                
+                let selectCrossref = [...baseFields];
+                if (needAbstract) selectCrossref.push('abstract');
+                if (needKeywords) selectCrossref.push('subject');
+                // 注意：CrossRef 本身不提供 citationCount，但我们保留占位，实际从其他API获取
+                if (needCitation) selectCrossref.push('citationCount'); // 可能无效，但保留
+                
+                let selectS2 = [...baseFields];
+                if (needAbstract) selectS2.push('abstract');
+                if (needKeywords) selectS2.push('fieldsOfStudy');
+                if (needCitation) selectS2.push('citationCount');
+                
+                // 并行调用API，只请求必要字段
+                const [s2Result, crossrefResult, openalexResult] = await Promise.allSettled([
+                    getSemanticScholarPaperByDoi(doi, selectS2.join(',')),
+                    getCrossrefPaperByDoi(doi, selectCrossref.join(',')),
+                    getOpenAlexPaperByDoi(doi, selectOpenAlex.join(','))
+                ]);
+                
+                // 处理 Crossref 结果
+                if (crossrefResult.status === 'fulfilled') {
+                    const crossref = crossrefResult.value;
+                    merged.conferenceName = crossref.conferenceName || merged.conferenceName;
+                    merged.conferenceLocation = crossref.conferenceLocation || merged.conferenceLocation;
+                    merged.articleNumber = crossref.articleNumber || merged.articleNumber;
+                    merged.firstPage = crossref.firstPage || merged.firstPage;
+                    merged.lastPage = crossref.lastPage || merged.lastPage;
+                    merged.pageRange = crossref.pageRange || merged.pageRange;
+                    merged.publicationDate = crossref.publicationDate || merged.publicationDate;
+                    merged.publicationMonth = crossref.publicationMonth || merged.publicationMonth;
+                    merged.publicationDay = crossref.publicationDay || merged.publicationDay;
+                    merged.conferenceEventDate = crossref.conferenceEventDate || merged.conferenceEventDate;
+                    merged.conferenceStartDate = crossref.conferenceStartDate || merged.conferenceStartDate;
+                    merged.conferenceEndDate = crossref.conferenceEndDate || merged.conferenceEndDate;
+                    merged.language = crossref.language || merged.language;
+                    if (crossref.keywords) {
+                        merged.keywords = [...new Set([...(merged.keywords || []), ...crossref.keywords])];
                     }
-                } catch (e) {
-                    console.warn('会议日期查询失败:', e);
-                }
-            }
-            } catch (e) {}
-            // 强制拆分会议日期区间为开始和结束日期
-            if (merged.conferenceEventDate && !merged.conferenceStartDate) {
-                const parts = String(merged.conferenceEventDate).split(/[~\-至]/);
-                if (parts.length >= 2) {
-                    merged.conferenceStartDate = parts[0].trim();
-                    merged.conferenceEndDate = parts[1].trim();
-                } else {
-                    merged.conferenceStartDate = merged.conferenceEventDate;
-                    merged.conferenceEndDate = merged.conferenceEventDate;
-                }
-            }
-
-            if (this.formFillingAgent && this.formFillingAgent.discoveryCache) {
-                // 更新会议日期专用缓存（如果有）
-                const cacheKey = `_conference_event_date_${merged.venue}_${merged.year}`;
-                if (this.formFillingAgent.discoveryCache[cacheKey]) {
-                    // 如果缓存中有原始数据，我们也更新它的起止日期
-                    this.formFillingAgent.discoveryCache[cacheKey].conferenceStartDate = merged.conferenceStartDate;
-                    this.formFillingAgent.discoveryCache[cacheKey].conferenceEndDate = merged.conferenceEndDate;
+                    if (needAbstract && crossref.abstract) {
+                        merged.abstract = crossref.abstract;
+                    }
                 }
                 
-                // 更新论文元数据缓存（如果有）
-                const metaKey = `_paper_meta_for_${merged.title}`;
-                if (this.formFillingAgent.discoveryCache[metaKey]) {
-                    this.formFillingAgent.discoveryCache[metaKey].conferenceStartDate = merged.conferenceStartDate;
-                    this.formFillingAgent.discoveryCache[metaKey].conferenceEndDate = merged.conferenceEndDate;
+                // 处理 OpenAlex 结果
+                if (openalexResult.status === 'fulfilled') {
+                    const openalex = openalexResult.value;
+                    if (needCitation && merged.citationCount == null && openalex.citationCount != null) {
+                        merged.citationCount = openalex.citationCount;
+                    }
+                    if (needAbstract && !merged.abstract && openalex.abstract) {
+                        merged.abstract = openalex.abstract;
+                    }
+                    if (needGrants && openalex.grants) {
+                        merged.grants = openalex.grants;
+                    }
+                    merged.articleNumber = merged.articleNumber || openalex.articleNumber;
+                    merged.firstPage = merged.firstPage || openalex.firstPage;
+                    merged.lastPage = merged.lastPage || openalex.lastPage;
+                    merged.pageRange = merged.pageRange || openalex.pageRange;
+                    merged.publicationDate = merged.publicationDate || openalex.publicationDate;
+                    merged.publicationMonth = merged.publicationMonth || openalex.publicationMonth;
+                    merged.publicationDay = merged.publicationDay || openalex.publicationDay;
+                    merged.language = merged.language || openalex.language;
+                    if (openalex.keywords) {
+                        merged.keywords = [...new Set([...(merged.keywords || []), ...openalex.keywords])];
+                    }
                 }
+                
+                // 处理 Semantic Scholar 结果
+                if (s2Result.status === 'fulfilled') {
+                    const s2 = s2Result.value;
+                    if (needCitation && merged.citationCount == null && s2.citationCount != null) {
+                        merged.citationCount = s2.citationCount;
+                    }
+                    if (needAbstract && !merged.abstract && s2.abstract) {
+                        merged.abstract = s2.abstract;
+                    }
+                    merged.openAccessPdf = merged.openAccessPdf || s2.openAccessPdf;
+                    merged.publicationDate = merged.publicationDate || s2.publicationDate;
+                    if (s2.keywords) {
+                        merged.keywords = [...new Set([...(merged.keywords || []), ...s2.keywords])];
+                    }
+                }
+                
+                // 更新 this.selectedPaper
+                this.selectedPaper = merged;
+            } catch (e) {
+                console.warn('补充论文元数据失败:', e);
+                // 如果失败，保留原始选中的论文
             }
-
-            this.selectedPaper = merged;
         }
 
         const venueBase = this.selectedPaper.venue || this.selectedPaper.conferenceName || '';
@@ -1874,14 +1865,30 @@ class FormFillingSidebar {
                 aiCall,
                 new Promise((_, reject) => setTimeout(() => reject(new Error(`AI处理超时(${timeoutMs}ms)`)), timeoutMs))
             ]);
-            console.log('AI字段结果:', {
-                fieldName: field?.name,
-                fieldLabel: field?.label,
-                groupName: currentGroup?.name,
-                result: aiResult
-            });
             
-            // 如果是从缓存中命中的，也显示给用户确认，而不是自动填充
+            console.log('AI字段结果:', { fieldName: field?.name, fieldLabel: field?.label, groupName: currentGroup?.name, result: aiResult });
+            
+            // ========== 新增：处理取消结果 ==========
+            // 当用户在 AI 思考过程中点击“跳过字段”或“停止填表”时，
+            // _aiFillField 会返回 { type: 'cancelled' }
+            if (aiResult && aiResult.type === 'cancelled') {
+                console.log('AI 任务已被用户取消，跳过当前字段');
+                this.hideAIThinking();
+                // 跳过当前字段（直接调用 skipCurrentField 会再次取消，但此时 agent 已经取消，可以安全调用）
+                this.skipCurrentField();
+                return;
+            }
+            // =====================================
+            
+            // 1. 空结果检查
+            if (!aiResult) {
+                this.setStatus('AI 未返回有效结果，请手动输入', 'warning');
+                this.showManualInputInterface(field);
+                this.hideAIThinking();
+                return;
+            }
+            
+            // 2. 缓存命中分支
             if (aiResult.fromCache) {
                 const ans = String(aiResult.answer || '').trim();
                 if (!ans || ans.toUpperCase() === 'UNKNOWN') {
@@ -1893,22 +1900,23 @@ class FormFillingSidebar {
                 }
                 this.updateFieldStatus(field.name, 'success', `✨ 从缓存中找到答案`);
                 this.showAIRecommendation(field, ans);
-                // 同步发现数据（如果有）
                 if (aiResult.discoveryData) {
                     this._applyDiscoveryDataToUI(aiResult.discoveryData, ans);
                 }
                 this.setStatus('已生成推荐答案（来自缓存）', 'success');
                 this.hideAIThinking();
-                return; 
+                return;
             }
-
+            
+            // 3. AI 成功生成结果
             if (aiResult.success) {
                 // 如果 AI 在本次思考中提取到了额外信息，同步到缓存
                 if (aiResult.discoveryData) {
                     console.log('💡 AI 发现了群组缓存数据:', aiResult.discoveryData);
                     Object.assign(this.formFillingAgent.discoveryCache, aiResult.discoveryData);
                 }
-
+                
+                // 3.1 普通答案（Finish）
                 if (aiResult.type === 'finish') {
                     const ans = String(aiResult.answer || '').trim();
                     if (!ans || ans.toUpperCase() === 'UNKNOWN') {
@@ -1917,44 +1925,53 @@ class FormFillingSidebar {
                         this.hideAIThinking();
                         return;
                     }
+                    // 显示推荐答案
                     this.showAIRecommendation(field, ans);
                     this.setStatus('已生成推荐答案', 'success');
-                } else if (aiResult.type === 'options') {
-                    // 显示AI多选建议
+                    this.hideAIThinking();
+                    return;
+                }
+                
+                // 3.2 多选项（Options）
+                else if (aiResult.type === 'options') {
                     const opts = Array.isArray(aiResult.options) ? aiResult.options : [];
+                    console.log('AI 返回 options 列表:', opts);
                     if (!opts.length) {
                         this.setStatus('AI 未找到可选答案，请手动输入', 'warning');
                         this.showManualInputInterface(field);
                         this.hideAIThinking();
                         return;
                     }
+                    this.resetOptionsDisplay();
                     this.showAIMultipleChoices(field, opts, aiResult.discoveryData);
                     this.setStatus('发现多个候选，请选择', 'info');
-                } else {
+                    this.aiMultipleChoices.style.display = 'block';
+                    this.optionsDisplay.style.display = 'block';
+                    this.hideAIThinking();
+                    return;
+                }
+                
+                // 3.3 未知类型（兜底）
+                else {
+                    console.warn('AI 返回了未知结果类型:', aiResult.type);
                     this.setStatus('AI 返回了未知结果类型，请手动输入', 'warning');
                     this.showManualInputInterface(field);
                     this.hideAIThinking();
                     return;
                 }
-                
-                // 统一在显示完主推荐后再应用发现数据，避免被 showAIRecommendation 内部的 resetOptionsDisplay 冲掉
-                if (aiResult.discoveryData) {
-                    this._applyDiscoveryDataToUI(aiResult.discoveryData, aiResult.type === 'finish' ? aiResult.answer : null);
-                }
-                this.hideAIThinking();
-            } else {
+            }
+            
+            // 4. AI 未成功生成结果
+            else {
                 console.error('AI未能生成答案:', aiResult.message);
-                
-                // 显示错误信息并提供手动输入选项
                 this.setStatus(`AI生成答案失败: ${aiResult.message}`, 'error');
                 this.showManualInputInterface(field);
                 this.hideAIThinking();
+                return;
             }
             
         } catch (error) {
             console.error('AI处理字段失败:', error);
-            
-            // 出错时显示错误信息并提供手动输入选项
             const msg = String(error?.message || '');
             if (msg.includes('AI处理超时')) {
                 this.setStatus('AI 处理超时，请手动输入', 'warning');
@@ -2014,40 +2031,130 @@ class FormFillingSidebar {
     }
 
     showAIMultipleChoices(field, options, discoveryData = null) {
+        console.log('显示多选推荐，选项数量:', options.length);
+        
         this.resetOptionsDisplay();
         this.choicesList.innerHTML = '';
-        // 限制最多显示 10 个候选项，并过滤掉明显的错误项（如截断提示）
+        
+        // 构建字段选项映射（文本 -> 值）
+        const fieldOptionsMap = new Map();
+        if (field.options && field.options.length) {
+            field.options.forEach(opt => {
+                fieldOptionsMap.set(opt.text, opt.value);
+                if (opt.value) fieldOptionsMap.set(opt.value, opt.value);
+            });
+        }
+        
         const displayOptions = options
-            .filter(opt => !opt.includes('内容过长') && !opt.includes('系统提示'))
+            .map(opt => {
+                let text = '';
+                let value = '';
+                if (typeof opt === 'string') {
+                    text = opt;
+                    // 尝试匹配字段选项中的值或文本
+                    if (fieldOptionsMap.has(opt)) {
+                        value = fieldOptionsMap.get(opt);
+                    } else {
+                        // 尝试查找文本包含关系
+                        for (let [k, v] of fieldOptionsMap.entries()) {
+                            if (k.includes(opt) || opt.includes(k)) {
+                                value = v;
+                                text = k;
+                                break;
+                            }
+                        }
+                        if (!value) value = opt;
+                    }
+                } else if (opt && typeof opt === 'object') {
+                    text = opt.text || '';
+                    value = opt.value || opt.text || '';
+                    // 同样尝试匹配
+                    if (fieldOptionsMap.has(value)) value = fieldOptionsMap.get(value);
+                    if (fieldOptionsMap.has(text)) value = fieldOptionsMap.get(text);
+                }
+                return { text, value };
+            })
+            .filter(opt => opt.text)
             .slice(0, 10);
-        displayOptions.forEach(option => {
+        
+        if (displayOptions.length === 0) {
+            console.warn('没有有效的候选项可显示');
+            this.setStatus('AI 返回的候选项无效，请手动输入', 'warning');
+            this.showManualInputInterface(field);
+            this.hideAIThinking();
+            return;
+        }
+        
+        this._currentCandidateOptions = displayOptions;
+        
+        displayOptions.forEach(opt => {
             const btn = document.createElement('button');
             btn.className = 'btn choice-item';
-            btn.textContent = option;
+            btn.textContent = opt.text;
             btn.onclick = () => {
-                // 如果发现缓存中有该选项的元数据，将其提取到顶层，以便后续字段使用
-                if (discoveryData) {
-                    // 尝试匹配 key (选项文本)
-                    const meta = discoveryData[option] || discoveryData[option.trim()];
-                    if (meta && typeof meta === 'object') {
-                        console.log(`🎯 用户选择了 ${option}，同步元数据到发现缓存:`, meta);
-                        Object.assign(this.formFillingAgent.discoveryCache, meta);
-                    }
-                }
-                this.fillCurrentField(option, 'ai');
+                this.fillCurrentFieldWithValue(opt.value, 'ai', opt.text);
             };
             this.choicesList.appendChild(btn);
         });
-        if (options.length > 10) {
-            const tip = document.createElement('div');
-            tip.style.fontSize = '11px';
-            tip.style.color = '#718096';
-            tip.style.marginTop = '5px';
-            tip.textContent = `注：共有 ${options.length} 条结果，仅显示前 10 条。`;
-            this.choicesList.appendChild(tip);
-        }
+        
         this.aiMultipleChoices.style.display = 'block';
         this.optionsDisplay.style.display = 'block';
+    }
+
+    async fillCurrentFieldWithValue(value, method, displayText = null) {
+        const field = this.activeField;
+        if (!field) return;
+
+        // 立即重置 UI
+        this.resetOptionsDisplay();
+        this.aiThinkingDisplay.style.display = 'none';
+        this.fieldActionChoice.style.display = 'none';
+        
+        try {
+            // 通过 background 填写
+            const response = await this.sendMessageToBackground({
+                action: 'fillFormField',
+                data: {
+                    fieldName: field.name,
+                    value: value,
+                    tabId: this.formTabId
+                }
+            });
+            
+            if (response.success) {
+                // 记录已填写的字段
+                this.filledFields[field.name] = {
+                    label: field.label || field.name,
+                    answer: value,
+                    value: value,
+                    method: method,
+                    fieldType: field.type || 'text',
+                    timestamp: Date.now()
+                };
+                
+                // 同步上下文
+                this.filledContext[field.name] = {
+                    label: field.label || field.name,
+                    answer: value,
+                    fieldType: field.type || 'text'
+                };
+                
+                // 更新统计和进度
+                this.updateStats();
+                const totalFilled = Object.keys(this.filledFields).length;
+                const progressPercent = (totalFilled / this.currentFormFields.length) * 100;
+                this.progressFill.style.width = `${progressPercent}%`;
+                this.progressInfo.textContent = `已填写 ${Object.keys(this.filledFields).length}/${this.currentFormFields.length} 个字段`;
+                
+                // 移动到下一个未填字段
+                await this.moveToNextUnfilledField();
+            } else {
+                this.setStatus('填写字段失败: ' + response.message, 'error');
+            }
+        } catch (error) {
+            console.error('填写字段失败:', error);
+            this.setStatus('填写字段失败: ' + error.message, 'error');
+        }
     }
 
     showManualInputInterface(field) {
@@ -2058,7 +2165,7 @@ class FormFillingSidebar {
 
     async useAiRecommendation() {
         const recommendation = this.recommendationContent.textContent;
-        await this.fillCurrentField(recommendation, 'ai');
+        await this.fillCurrentFieldWithValue(recommendation, 'ai');
     }
 
     editAiRecommendation() {
@@ -2075,8 +2182,7 @@ class FormFillingSidebar {
             this.setStatus('请输入答案', 'warning');
             return;
         }
-        
-        await this.fillCurrentField(userInput, 'manual');
+        await this.fillCurrentFieldWithValue(userInput, 'manual');
     }
 
     _applyDiscoveryDataToUI(discoveryData, currentFieldAnswer = null) {
@@ -2367,6 +2473,11 @@ class FormFillingSidebar {
     }
 
     skipCurrentField() {
+        // 如果正在运行 AI 任务，立即取消
+        if (this.formFillingAgent) {
+            this.formFillingAgent.cancelCurrentTask();
+        }
+
         const field = this.activeField;
         if (!field) return;
 
@@ -2399,11 +2510,13 @@ class FormFillingSidebar {
     }
 
     quitFilling() {
+        // 取消正在运行的 AI 任务
+        if (this.formFillingAgent) {
+            this.formFillingAgent.cancelCurrentTask();
+        }
+
         this.fillingInProgress = false;
         this.setStatus('填表已退出', 'info');
-        
-        
-        
         this.resetToStartPage();
     }
 
@@ -2488,12 +2601,13 @@ class FormFillingSidebar {
     }
 
     stopFillingProcess() {
+        // 取消正在运行的 AI 任务
+        if (this.formFillingAgent) {
+            this.formFillingAgent.cancelCurrentTask();
+        }
+
         this.fillingInProgress = false;
         this.setStatus('填表已停止', 'info');
-        
-        
-        
-        
         this.resetToStartPage();
     }
 

@@ -23,57 +23,58 @@ class FormFillingAgent {
         // 专用的表单填写提示词模板
         this.FORM_PROMPT_TEMPLATE = `你是一个专业的表单填写助手，专门帮助填写网页表单。
 
-表单信息：
-表单标题：{form_title}
-表单描述：{form_description}
+        表单信息：
+        表单标题：{form_title}
+        表单描述：{form_description}
 
-当前字段群组信息：
-群组名称：{group_name}
-同组其他字段：{group_fields}
+        当前字段群组信息：
+        群组名称：{group_name}
+        同组其他字段：{group_fields}
 
-当前字段信息：
-字段名称：{field_label}
-字段类型：{field_type}
-是否必填：{required}
-提示文本：{placeholder}
-字段描述：{field_desc}
-验证规则：{validation_rules}
+        当前字段信息：
+        字段名称：{field_label}
+        字段类型：{field_type}
+        是否必填：{required}
+        提示文本：{placeholder}
+        字段描述：{field_desc}
+        验证规则：{validation_rules}
 
-已填写字段（上下文）：
-{filled_context}
+        已填写字段（上下文）：
+        {filled_context}
 
-发现缓存（在之前的搜索中偶然发现的相关信息）：
-{discovery_cache}
+        发现缓存（在之前的搜索中偶然发现的相关信息）：
+        {discovery_cache}
 
-可用工具：
-{tools}
-    
-重要指导：
-1. 优先使用API：
-    * 使用 GetPaperDetails[论文标题] 获取标题、作者、年份、期刊/会议、DOI 等基础信息。
-    * 使用 GetPaperDetailsSemanticScholar[论文标题 或 {"doi": "..."}] 获取关键词、摘要、引用数、PDF 链接等补充信息。
-    * 使用 GetAuthorDetails[作者姓名] 或 GetAuthorDetailsSemanticScholar[作者姓名] 获取作者主页、别名与机构信息。
-    * 引用次数优先调用 GetCitationCount[{ "doi": "..." }]，无法获取时再从 Semantic Scholar 中读取 citationCount。
-    * 会议日期/地点可调用 GetWorkOpenAlex[{ "doi": "..." }] 或 GetWorkCrossRef[{ "doi": "..." }]。
-    * 需要会议地点时可调用 GetConferenceLocation[{ "name": "会议名称", "year": 2024 }]。
-    * 需要会议组织者时可调用 GetConferenceOrganizers[{ "name": "会议名称", "year": 2024 }]。
-2. 聚焦当前字段：
-    * 核心任务是填写当前字段（{field_label}）。仅在最后用 JSON 补充你顺便获得的同组字段。
-3. 选项优先：
-    * 若存在多个高质量候选答案，使用 Options[选项1 | 选项2 | ...]，最多 10 项。
-4. 缓存优先：
-    * 如果“发现缓存”中已有答案或完整元数据，直接 Finish，不要重复调用工具。
-5. 信息整合：
-    * 对具体事实类字段需给出确定值；对叙述类字段基于已知信息生成1-3句完整句子。
-6. 批量提取：
-    * 通过一次或多次API调用（DBLP + Semantic Scholar + CrossRef/OpenAlex）获取论文详细信息，请将相关字段一并放入 Finish 后的 JSON。
-    
-请严格按照以下格式思考，不要添加任何多余的 Markdown 标记：
-Thought: 思考过程（必须包含你对任务类型的判断。**如果是综合叙述型且已到第 8 步，必须在 Thought 中写明“已达步数上限，开始总结”**）
-Action: ToolName[Input]
-    
-现在开始：
-`;
+        可用工具：
+        {tools}
+            
+        **重要指导**：
+        1. **按需调用API**：只获取解决当前字段所需的信息。在调用工具时，务必通过参数（如 select、fields）指定你需要的字段，避免请求全部数据。
+        - 示例：GetWorkOpenAlex[{"doi": "10.xxx", "select": ["title", "authors", "publication_year"]}]
+        - 示例：GetPaperDetailsSemanticScholar[{"doi": "10.xxx", "fields": ["citationCount", "abstract"]}]
+        - 基础字段通常包括：title, authors, year, venue, doi, url。如果只需要这些，可以不指定 select/fields 或使用默认值。
+        2. **缓存优先**：如果“发现缓存”中已有答案或完整元数据，直接 Finish，不要重复调用工具。
+        3. **选项优先**：若存在多个高质量候选答案，使用 Options[选项1 | 选项2 | ...]，最多 10 项。
+        4. **信息整合**：对具体事实类字段需给出确定值；对叙述类字段基于已知信息生成1-3句完整句子。
+        5. **批量提取**：如果同组有其他字段，且可以通过一次API调用获取，请在 Finish 的 JSON 中一并返回。
+        6. **输出格式**：
+        - 最终答案使用 Finish[答案文本]
+        - 如果还附带其他字段的发现数据，用 JSON 代码块包裹：
+            \`\`\`json
+            {
+            "字段名1": "值1",
+            "字段名2": "值2",
+            "source": "API名称"
+            }
+            \`\`\`
+        - 多选项使用 Options[选项1 | 选项2]，JSON 同理。
+        
+        请严格按照以下格式思考，不要添加任何多余的 Markdown 标记：
+        Thought: 思考过程（必须包含你对任务类型的判断。**如果是综合叙述型且已到第 8 步，必须在 Thought 中写明“已达步数上限，开始总结”**）
+        Action: ToolName[Input]
+            
+        现在开始：
+        `;
     }
 
     async fillFormInteractively(url, loginInfo = null) {
@@ -227,7 +228,8 @@ Action: ToolName[Input]
                             return {
                                 ...match, // 保留 DOM 字段的所有属性
                                 ...node,  // 覆盖 LLM 的属性
-                                isField: true
+                                isField: true,
+                                format_hint: node.format_hint || match.format_hint
                             };
                         }
                         return null;
@@ -1081,524 +1083,112 @@ ${JSON.stringify(fieldInfo, null, 2)}
         }
     }
 
-    async _aiFillField(field, formStructure, group, context = null) {
-        /**
-         * 使用AI智能填写字段，考虑上下文和群组信息
-         */
-        const fieldLabel = field.label || field.name;
-        const fieldKey = field.name || fieldLabel;
-        
-        // --- 核心优化：缓存预检 (Cache Fast-Path) ---
-        // 检查发现缓存中是否已有该群组字段的答案，如果有，直接返回，避免冗余搜索
-        if (this.discoveryCache) {
-            // 尝试匹配：字段名、标签、或者模糊匹配
-            const cachedValue = this.discoveryCache[fieldKey] || 
-                                this.discoveryCache[fieldLabel] || 
-                                this._fuzzyMatchCache(fieldLabel);
-                            
-            
-                                
-            // 特殊处理：如果当前是期刊/会议字段，检查是否有缓存的期刊/会议信息
-            if (!cachedValue && (fieldLabel.toLowerCase().includes('venue') || fieldLabel.toLowerCase().includes('conference') || fieldLabel.toLowerCase().includes('journal'))) {
-                // 检查是否有与已填论文标题关联的期刊信息
-                const paperTitle = context[Object.keys(context).find(k => k.toLowerCase().includes('title'))]?.answer;
-                if (paperTitle) {
-                    const cachedVenue = this.discoveryCache[`_venue_for_${paperTitle}`];
-                    if (cachedVenue) {
-                        console.log(`📚 发现缓存的期刊/会议信息: ${paperTitle} -> ${cachedVenue}`);
-                        return {
-                            success: true,
-                            type: 'finish',
-                            answer: cachedVenue,
-                            fromCache: true,
-                            message: `已从缓存中获取期刊/会议信息：${cachedVenue}`
-                        };
-                    }
-                }
-            }
-                                
-            // 特殊处理：如果当前是年份字段，检查是否有缓存的年份信息
-            if (!cachedValue && (fieldLabel.toLowerCase().includes('year') || fieldLabel.toLowerCase().includes('publication'))) {
-                // 检查是否有与已填论文标题关联的年份信息
-                const paperTitle = context[Object.keys(context).find(k => k.toLowerCase().includes('title'))]?.answer;
-                if (paperTitle) {
-                    const cachedYear = this.discoveryCache[`_year_for_${paperTitle}`];
-                    if (cachedYear) {
-                        console.log(`📅 发现缓存的年份信息: ${paperTitle} -> ${cachedYear}`);
-                        return {
-                            success: true,
-                            type: 'finish',
-                            answer: cachedYear,
-                            fromCache: true,
-                            message: `已从缓存中获取年份信息：${cachedYear}`
-                        };
-                    }
-                }
-            }
-            
-            // 特殊处理：如果当前是 Keywords/Abstract/引用次数/会议日期/地点等字段，尝试从整篇元数据缓存中命中
-            const isPaperMetadataField = fieldLabel.toLowerCase().includes('keyword') || 
-                                        fieldLabel.toLowerCase().includes('abstract') || 
-                                        fieldLabel.toLowerCase().includes('关键词') || 
-                                        fieldLabel.toLowerCase().includes('摘要') ||
-                                        fieldLabel.toLowerCase().includes('引用') ||
-                                        fieldLabel.toLowerCase().includes('citation') ||
-                                        fieldLabel.toLowerCase().includes('日期') ||
-                                        fieldLabel.toLowerCase().includes('地点');
-            if (!cachedValue && isPaperMetadataField) {
-                const paperTitle = context[Object.keys(context).find(k => k.toLowerCase().includes('title'))]?.answer;
-                if (paperTitle) {
-                    const meta = this.discoveryCache[`_paper_meta_for_${paperTitle}`];
-                    const byField =
-                        fieldLabel.toLowerCase().includes('keyword') || fieldLabel.toLowerCase().includes('关键词') ? (meta?.keywords || this.discoveryCache[`_keywords_for_${paperTitle}`]) :
-                        fieldLabel.toLowerCase().includes('abstract') || fieldLabel.toLowerCase().includes('摘要') ? (meta?.abstract || this.discoveryCache[`_abstract_for_${paperTitle}`]) :
-                        fieldLabel.toLowerCase().includes('引用') || fieldLabel.toLowerCase().includes('citation') ? (meta?.citationCount || this.discoveryCache[`_citation_for_${paperTitle}`]) :
-                        fieldLabel.toLowerCase().includes('日期') ? (meta?.publicationDate || this.discoveryCache[`_date_for_${paperTitle}`]) :
-                        fieldLabel.toLowerCase().includes('地点') ? (meta?.location || this.discoveryCache[`_location_for_${paperTitle}`]) :
-                        null;
-                    if (byField) {
-                        console.log(`📝 发现缓存的元数据字段: ${fieldLabel} -> ${byField}`);
-                        return {
-                            success: true,
-                            type: 'finish',
-                            answer: byField,
-                            fromCache: true,
-                            message: `已从缓存中获取元数据信息`
-                        };
-                    }
-                }
-            }
-                                
-            // 特殊处理：如果当前是作者字段，检查是否有缓存的作者页面URL
-            const isAuthorUrlField = (fieldLabel.toLowerCase().includes('author') || fieldLabel.toLowerCase().includes('dblp')) && fieldLabel.toLowerCase().includes('url');
-            if (!cachedValue && isAuthorUrlField) {
-                const authorName = context[Object.keys(context).find(k => k.toLowerCase().includes('author') && !k.toLowerCase().includes('url'))]?.answer || 
-                                 fieldLabel.replace(/\s*url\s*/gi, '').replace(/dblp/gi, '').trim();
-                if (authorName) {
-                    const cachedUrl = this.discoveryCache[`_author_url_${authorName}`] || this.discoveryCache['dblp_persistent_url'];
-                    if (cachedUrl) {
-                        console.log(`🔗 发现缓存的作者页面URL: ${authorName} -> ${cachedUrl}`);
-                        return {
-                            success: true,
-                            type: 'finish',
-                            answer: cachedUrl,
-                            fromCache: true,
-                            message: `已从缓存中获取作者页面URL：${cachedUrl}`
-                        };
-                    }
-                }
-            }
-                            
-            if (cachedValue) {
-                console.log(`✨ 从发现缓存中命中答案: '${fieldLabel}' -> ${cachedValue.substring(0, 100)}...`);
-                                
-                // 特殊处理：如果是URL字段且缓存中有URL，直接返回
-                if (fieldLabel.toLowerCase().includes('url') || field.type === 'url') {
-                    return {
-                        success: true,
-                        type: 'finish',
-                        answer: cachedValue,
-                        fromCache: true,
-                        message: `已从缓存中获取URL：${cachedValue}`
-                    };
-                }
-                                
-                return {
-                    success: true,
-                    type: 'finish',
-                    answer: cachedValue,
-                    fromCache: true,
-                    message: `已从之前的搜索中自动提取到答案：${cachedValue.substring(0, 100)}...`
-                };
-            }
+    cancelCurrentTask() {
+        if (this.agent) {
+            this.agent.cancel();
+            this.agent = null;   // 清除引用
         }
-        
-        console.log(`🤖 AI正在为 '${fieldLabel}' 思考（属于群组: ${group.name}）...`);
-        
-        try {
-            const ctx = context || this.filledContext || {};
-            const flat = {};
-            for (const [k, v] of Object.entries(ctx)) {
-                if (v && typeof v === 'object') {
-                    if (v.answer != null) flat[k] = v.answer;
-                    if (v.label && v.answer != null) flat[v.label] = v.answer;
-                } else if (v != null) {
-                    flat[k] = v;
-                }
-            }
+    }
 
-            const paperTitleKey = Object.keys(ctx).find(k => {
-                const s = String(k).toLowerCase();
-                return s.includes('title') || s.includes('题目') || s.includes('标题');
-            });
-            const paperTitle = paperTitleKey ? (ctx[paperTitleKey]?.answer || ctx[paperTitleKey]) : '';
-            const paperMeta = paperTitle ? (this.discoveryCache[`_paper_meta_for_${paperTitle}`] || {}) : {};
+    async _aiFillField(field, formStructure, group, context = null) {
+        // 1. 检查缓存
+        const cached = this._getCachedAnswer(field);
+        if (cached) {
+            return { success: true, answer: cached, fromCache: true, type: 'finish' };
+        }
 
-            const known = {
-                ...paperMeta,
-                title: paperMeta.title || flat['论文标题'] || flat['title'] || paperTitle || '',
-                authors: paperMeta.authors || flat['论文作者'] || flat['作者'] || flat['authors'] || '',
-                venue: paperMeta.venue || flat['期刊/会议'] || flat['venue'] || '',
-                venueRaw: paperMeta.venueRaw || flat['期刊/会议(原始)'] || flat['venueRaw'] || '',
-                year: paperMeta.year || flat['年份'] || flat['year'] || '',
-                doi: paperMeta.doi || flat['DOI'] || flat['doi'] || '',
-                url: paperMeta.url || flat['链接'] || flat['url'] || '',
-                abstract: paperMeta.abstract || flat['摘要'] || flat['abstract'] || '',
-                keywords: paperMeta.keywords || flat['关键词'] || flat['keywords'] || '',
-                citationCount: paperMeta.citationCount != null ? paperMeta.citationCount : (flat['引用次数'] || flat['citationCount'] || ''),
-                grants: paperMeta.grants || flat['基金/资助'] || flat['grants'] || '',
-                articleNumber: paperMeta.articleNumber || flat['文章号/编码'] || flat['文章号'] || flat['articleNumber'] || '',
-                firstPage: paperMeta.firstPage || flat['起始页码'] || flat['firstPage'] || '',
-                lastPage: paperMeta.lastPage || flat['终止页码'] || flat['lastPage'] || '',
-                pageRange: paperMeta.pageRange || flat['页码范围'] || flat['pageRange'] || '',
-                publicationDate: paperMeta.publicationDate || flat['发表日期'] || flat['publicationDate'] || '',
-                publicationMonth: paperMeta.publicationMonth || flat['发表月份'] || flat['publicationMonth'] || '',
-                publicationDay: paperMeta.publicationDay || flat['发表日'] || flat['publicationDay'] || '',
-                conferenceEventDate: paperMeta.conferenceEventDate || flat['会议举办日期'] || flat['conferenceEventDate'] || '',
-                conferenceStartDate: paperMeta.conferenceStartDate || flat['会议开始日期'] || flat['conferenceStartDate'] || '',
-                conferenceEndDate: paperMeta.conferenceEndDate || flat['会议结束日期'] || flat['conferenceEndDate'] || '',
-                conferenceStartMonth: paperMeta.conferenceStartMonth || flat['会议开始月份'] || flat['conferenceStartMonth'] || '',
-                conferenceStartDay: paperMeta.conferenceStartDay || flat['会议开始日'] || flat['conferenceStartDay'] || '',
-                conferenceEndMonth: paperMeta.conferenceEndMonth || flat['会议结束月份'] || flat['conferenceEndMonth'] || '',
-                conferenceEndDay: paperMeta.conferenceEndDay || flat['会议结束日'] || flat['conferenceEndDay'] || '',
-                conferenceName: paperMeta.conferenceName || flat['会议名称'] || flat['conferenceName'] || '',
-                conferenceLocation: paperMeta.conferenceLocation || flat['会议地点'] || flat['conferenceLocation'] || '',
-                organizers: paperMeta.organizers || flat['会议组织者'] || flat['organizers'] || '',
-                language: paperMeta.language || flat['文章语言'] || flat['语言'] || flat['language'] || '',
-                currentAuthor: flat['_当前作者'] || flat['当前作者'] || this.discoveryCache['_current_author_name'] || '',
-                currentAuthorIndex: flat['_作者行号'] || flat['作者行号'] || this.discoveryCache['_current_author_index'] || '',
-                filters: flat['筛选条件'] || ''
-            };
+        // 2. 构建问题描述
+        const fieldLabel = field.label || field.name;
+        const fieldType = field.type || 'text';
+        const required = field.required ? '是' : '否';
+        const fieldDesc = field.description || '无';
+        const filledText = this._formatAllContext(context);
+        const groupFields = group.fields.map(f => f.label || f.name).join(', ');
 
-            const label = String(fieldLabel || '').toLowerCase();
-            const type = String(field.type || '').toLowerCase();
-            const authorsStr = Array.isArray(known.authors) ? known.authors.join(', ') : String(known.authors || '');
+        const question = `
+    你是智能填表助手。当前需要填写字段：
+    - 标签：${fieldLabel}
+    - 类型：${fieldType}
+    - 必填：${required}
+    - 描述：${fieldDesc}
 
-            const heuristic = async () => {
-                const fieldName = (field.name || '').toLowerCase();
-                const fieldLabel = (field.label || '').toLowerCase();
-                // 解析字段名中的序号，如 "会议日期 [1]"
-                const fieldNameWithIndex = field.name || '';
-                const indexMatch = fieldNameWithIndex.match(/\[(\d+)\]\s*$/);
-                const indexHint = indexMatch ? parseInt(indexMatch[1], 10) : null;
-                const label = fieldLabel;
-                // ===== 增强：语言字段识别 =====
-                // 常见语言字段的关键词
-                const langKeywords = ['language', 'lang', '语种', '语言', '文章语言', '出版语言', '书写语言', '主要语言'];
-                const isLangField = langKeywords.some(kw => fieldLabel.includes(kw) || fieldName.includes(kw));
-                if (isLangField) {
-                    const rawCode = String(known.language || '').toLowerCase().trim();
-                    if (rawCode) {
-                       // 提取主要语言代码（例如 en-US -> en）
-                        const mainCode = rawCode.split('-')[0];
-                        // 根据字段标签的语言（中/英）返回对应文本
-                        if (fieldLabel.includes('language') || fieldLabel.includes('lang')) {
-                            // 英文标签环境，返回英文名称
-                           if (mainCode === 'en') return 'English';
-                            if (mainCode === 'zh') return 'Chinese';
-                            return mainCode; // 其他代码原样返回
-                        } else {
-                            // 中文标签环境，返回中文名称
-                            if (mainCode === 'en') return '英文';
-                            if (mainCode === 'zh') return '中文';
-                            return mainCode;
-                        }
-                    }
-                    // 如果已知数据中没有语言信息，则返回 UNKNOWN
-                    return 'UNKNOWN';
-                }
+    已填写字段（上下文）：
+    ${filledText}
 
-                // 如果字段名或标签明确是起始页，直接返回 known.firstPage
-                if (fieldName.includes('start_page') || fieldName.includes('startpage') ||
-                    fieldLabel.includes('起始页') || (fieldLabel.includes('起始') && fieldLabel.includes('页'))) {
-                    return String(known.firstPage || '');
-                }
-                if (fieldName.includes('end_page') || fieldName.includes('endpage') ||
-                    fieldLabel.includes('终止页') || fieldLabel.includes('结束页') || (fieldLabel.includes('终止') && fieldLabel.includes('页'))) {
-                    return String(known.lastPage || '');
-                }
-                if (label.includes('title') || label.includes('题目') || label.includes('标题')) return String(known.title || '');
-                if ((label.includes('作者') || label.includes('author')) && (label.includes('姓名') || label.includes('name')) && known.currentAuthor) return String(known.currentAuthor);
-                if (label.includes('author') || label.includes('作者')) return authorsStr;
-                // 会议地点优先于 venue，避免“会议地址”误命中 venue
-                if (label.includes('地点') || label.includes('地址') || label.includes('address') || label.includes('location')) {
-                    if (known.conferenceLocation) return String(known.conferenceLocation);
-                    const confName = String(known.venueRaw || known.conferenceName || known.venue || '').trim();
-                    const confYear = String(known.year || '').trim();
-                    if (confName && confYear && this.toolExecutor && this.toolExecutor.execute) {
-                        const r = await this.toolExecutor.execute(
-                            'GetConferenceLocation',
-                            { name: confName, year: confYear },
-                            { discoveryCache: this.discoveryCache }
-                        );
-                        const loc = r?.data?.location ? String(r.data.location).trim() : '';
-                        if (loc) {
-                            known.conferenceLocation = loc;
-                            if (paperTitle) {
-                                const metaKey = `_paper_meta_for_${paperTitle}`;
-                                if (this.discoveryCache[metaKey] && typeof this.discoveryCache[metaKey] === 'object') {
-                                    this.discoveryCache[metaKey].conferenceLocation = loc;
-                                }
-                            }
-                            return loc;
-                        }
-                    }
-                    return 'UNKNOWN';
-                }
-                const isConferenceDateField =
-                    (label.includes('会议') || label.includes('conference') || label.includes('event')) &&
-                    (label.includes('日期') || label.includes('时间') || label.includes('date') || label.includes('time')) &&
-                    !(label.includes('发表') || label.includes('出版') || label.includes('publication') || label.includes('publish'));
-                const isConferenceStartDateField =
-                    isConferenceDateField && (label.includes('开始') || label.includes('start') || label.includes('from') || label.includes('起始'));
-                const isConferenceEndDateField =
-                    isConferenceDateField && (label.includes('结束') || label.includes('end') || label.includes('to') || label.includes('终止'));
-                if (isConferenceDateField) {
-                    // 1. 明确有开始/结束关键词
-                    if (isConferenceStartDateField) return known.conferenceStartDate ? String(known.conferenceStartDate) : 'UNKNOWN';
-                    if (isConferenceEndDateField) return known.conferenceEndDate ? String(known.conferenceEndDate) : 'UNKNOWN';
+    同组其他字段（可能一起填写）：${groupFields}
 
-                    // 2. 根据序号映射
-                    if (indexHint !== null) {
-                        if (indexHint === 1) return known.conferenceStartDate ? String(known.conferenceStartDate) : 'UNKNOWN';
-                        if (indexHint === 2) return known.conferenceEndDate ? String(known.conferenceEndDate) : 'UNKNOWN';
-                    }
+    可用工具如下：
+    ${this.toolExecutor.getToolsDescription()}
 
-                    // 3. 无序号时返回整个区间或开始日期
-                    if (known.conferenceEventDate) return String(known.conferenceEventDate);
-                    if (known.conferenceStartDate) return String(known.conferenceStartDate);
+    请根据上下文，自主决定是否调用工具获取信息。你可以多次调用工具，最终输出该字段的值。
+    输出格式：
+    - 如果只有一个确定答案：Finish[答案]
+    - 如果有多个候选：Options[选项1 | 选项2 | ...]
+    `;
 
-                    // 4. 如果已知数据中没有，尝试通过工具查询（保留原有工具查询逻辑）
-                    const confName = String(known.venueRaw || known.conferenceName || known.venue || '').trim();
-                    const confYear = String(known.year || '').trim();
-                    if (confName && confYear && this.toolExecutor && this.toolExecutor.execute) {
-                        const r = await this.toolExecutor.execute(
-                            'GetConferenceEventDate',
-                            { name: confName, year: confYear },
-                            { discoveryCache: this.discoveryCache }
-                        );
-                        const data = r?.data || null;
-                        if (data && data.conferenceEventDate) {
-                            known.conferenceEventDate = data.conferenceEventDate || '';
-                            known.conferenceStartDate = data.conferenceStartDate || '';
-                            known.conferenceEndDate = data.conferenceEndDate || '';
-                            known.conferenceStartMonth = data.conferenceStartMonth || '';
-                            known.conferenceStartDay = data.conferenceStartDay || '';
-                            known.conferenceEndMonth = data.conferenceEndMonth || '';
-                            known.conferenceEndDay = data.conferenceEndDay || '';
-                            if (paperTitle) {
-                                const metaKey = `_paper_meta_for_${paperTitle}`;
-                                if (this.discoveryCache[metaKey] && typeof this.discoveryCache[metaKey] === 'object') {
-                                    Object.assign(this.discoveryCache[metaKey], {
-                                        conferenceEventDate: known.conferenceEventDate,
-                                        conferenceStartDate: known.conferenceStartDate,
-                                        conferenceEndDate: known.conferenceEndDate,
-                                        conferenceStartMonth: known.conferenceStartMonth,
-                                        conferenceStartDay: known.conferenceStartDay,
-                                        conferenceEndMonth: known.conferenceEndMonth,
-                                        conferenceEndDay: known.conferenceEndDay
-                                    });
-                                }
-                            }
-                            // 根据当前字段类型返回
-                            if (isConferenceStartDateField) return known.conferenceStartDate ? String(known.conferenceStartDate) : 'UNKNOWN';
-                            if (isConferenceEndDateField) return known.conferenceEndDate ? String(known.conferenceEndDate) : 'UNKNOWN';
-                            if (indexHint === 1) return known.conferenceStartDate ? String(known.conferenceStartDate) : 'UNKNOWN';
-                            if (indexHint === 2) return known.conferenceEndDate ? String(known.conferenceEndDate) : 'UNKNOWN';
-                            return String(known.conferenceEventDate);
-                        }
-                    }
-                    return 'UNKNOWN';
-                }
+        // 3. 使用 ReActAgent 执行
+        const tempAgent = new ReActAgent(this.llmClient, this.toolExecutor, 10, this.onStep);
+        this.agent = tempAgent;
+        const result = await tempAgent.run(question);
+        this.agent = null; 
 
-                if (label.includes('year') || label.includes('年份') || label.includes('出版')) return String(known.year || '');
+        if (result && result.type === 'cancelled') {
+            return { success: false, type: 'cancelled', message: 'AI 任务已被用户取消' };
+        }
 
-                if (
-                    (label.includes('venue') || label.includes('conference') || label.includes('journal') || label.includes('期刊') || label.includes('会议')) &&
-                    !(label.includes('地址') || label.includes('地点') || label.includes('address') || label.includes('location') || label.includes('组织者') || label.includes('organizer') || label.includes('organiser') || label.includes('chair'))
-                ) return String(known.venue || '');
-                
+        console.log("ReActAgent 返回结果:", result);   // ← 添加这一行
 
-                if (label.includes('发表日期') || label.includes('出版日期') || (label.includes('publication') && label.includes('date')) || (label.includes('publish') && label.includes('date'))) {
-                    return known.publicationDate ? String(known.publicationDate) : 'UNKNOWN';
-                }
-                if (label.includes('发表月份') || label.includes('出版月份') || ((label.includes('month') || label.includes('月份') || label.includes('月')) && (label.includes('发表') || label.includes('出版') || label.includes('publish') || label.includes('publication')))) {
-                    return known.publicationMonth ? String(known.publicationMonth) : 'UNKNOWN';
-                }
-                if (label.includes('发表日') || label.includes('出版日') || ((label.includes('day') || label.includes('日')) && (label.includes('发表') || label.includes('出版') || label.includes('publish') || label.includes('publication')))) {
-                    return known.publicationDay ? String(known.publicationDay) : 'UNKNOWN';
-                }
-                
-                const isStartPage = (label.includes('起始') || label.includes('首页') || label.includes('start') || label.includes('first')) && label.includes('page');
-                const isEndPage = (label.includes('终止') || label.includes('末页') || label.includes('end') || label.includes('last')) && label.includes('page');
-                const isPageRange = (label.includes('页码') || label.includes('pages') || label.includes('page range')) && !isStartPage && !isEndPage;
-                if (isStartPage) return known.firstPage ? String(known.firstPage) : 'UNKNOWN';
-                if (isEndPage) return known.lastPage ? String(known.lastPage) : 'UNKNOWN';
-                if (isPageRange) return known.pageRange ? String(known.pageRange) : 'UNKNOWN';
-                if (label.includes('组织者') || label.includes('organizer') || label.includes('organiser') || label.includes('chair')) {
-                    const existing = (() => {
-                        if (Array.isArray(known.organizers)) return known.organizers.filter(Boolean);
-                        const s = String(known.organizers || '').trim();
-                        if (!s) return [];
-                        return s.split(/[;,，；\n\t]+/).map(x => x.trim()).filter(Boolean);
-                    })();
-                    if (existing.length) return existing.join(', ');
-                    const confName = String(known.venueRaw || known.conferenceName || known.venue || '').trim();
-                    const confYear = String(known.year || '').trim();
-                    if (confName && confYear && this.toolExecutor && this.toolExecutor.execute) {
-                        const r = await this.toolExecutor.execute(
-                            'GetConferenceOrganizers',
-                            { name: confName, year: confYear },
-                            { discoveryCache: this.discoveryCache }
-                        );
-                        const orgs = Array.isArray(r?.data?.organizers) ? r.data.organizers : [];
-                        if (orgs.length) {
-                            known.organizers = orgs;
-                            if (paperTitle) {
-                                const metaKey = `_paper_meta_for_${paperTitle}`;
-                                if (this.discoveryCache[metaKey] && typeof this.discoveryCache[metaKey] === 'object') {
-                                    this.discoveryCache[metaKey].organizers = orgs;
-                                }
-                            }
-                            return orgs.join(', ');
-                        }
-                    }
-                    return 'UNKNOWN';
-                }
-                const isArticleNumber =
-                    label.includes('文章号') || label.includes('文章编号') || label.includes('文章编码') ||
-                    label.includes('articlenumber') || (label.includes('article') && label.includes('number')) ||
-                    ((label.includes('编号') || label.includes('编码')) && !label.includes('doi'));
-                if (isArticleNumber) return known.articleNumber ? String(known.articleNumber) : 'UNKNOWN';
-                if (label.includes('doi')) return String(known.doi || '');
-                if (label.includes('url') || label.includes('link') || label.includes('链接') || type === 'url') return String(known.url || '');
-                if (label.includes('abstract') || label.includes('摘要')) return String(known.abstract || '');
-                if (label.includes('keyword') || label.includes('关键词')) {
-                    if (Array.isArray(known.keywords)) return known.keywords.join(', ');
-                    return String(known.keywords || 'UNKNOWN');
-                }
-                if (label.includes('citation') || label.includes('引用')) return known.citationCount != null ? String(known.citationCount) : '';
-                if (label.includes('grant') || label.includes('fund') || label.includes('基金') || label.includes('资助')) {
-                    if (Array.isArray(known.grants)) return JSON.stringify(known.grants);
-                    return String(known.grants || '');
-                }
-                return '';
-            };
+        // 4. 处理结果（增加容错）
+        if (result && result.type === 'finish') {
+            this._cacheAnswer(field, result.answer);
+            return { success: true, type: 'finish', answer: result.answer, discoveryData: result.data };
+        } else if (result && result.type === 'options') {
+            return { success: true, type: 'options', options: result.options, discoveryData: result.data };
+        } else if (result && result.answer) {
+            // 如果 result 有 answer 但 type 不是标准值，则按 finish 处理
+            console.warn("ReActAgent 返回了非标准结构，但包含 answer，按 finish 处理:", result);
+            this._cacheAnswer(field, result.answer);
+            return { success: true, type: 'finish', answer: result.answer, discoveryData: result.data };
+        } else {
+            console.error("AI 未返回有效答案，result =", result);
+            return { success: false, message: 'AI 未返回有效答案' };
+        }
+    }
 
-            const direct = await heuristic();
-            if (direct) {
-                const cleaned = this._cleanAiAnswer(direct, field);
-                const validation = this._validateAnswer(cleaned, field);
-                return {
-                    success: true,
-                    type: 'finish',
-                    answer: cleaned,
-                    rawAnswer: cleaned,
-                    validation: validation,
-                    confidence: validation.confidence || 0.9
-                };
-            }
+    _getCachedAnswer(field) {
+        const key = field.name || field.label;
+        return this.discoveryCache && this.discoveryCache[key] ? this.discoveryCache[key] : null;
+    }
 
-            const options = field.options || [];
-            const optionTexts = options.map(o => (o.text || o.value || '')).filter(Boolean);
-
-            const messages = [{
-                role: "user",
-                content: [
-                    "你是一个表单字段映射器。你只能从已知数据中选择值，绝对不能编造、搜索、推断新的事实。",
-                    "如果找不到合适值，输出 UNKNOWN。",
-                    "只输出一个值，不要解释，不要换行，不要 Markdown。",
-                    "",
-                    `字段: ${fieldLabel}`,
-                    `字段类型: ${field.type || ''}`,
-                    optionTexts.length ? `可选项: ${optionTexts.join(' | ')}` : "可选项: (无)",
-                    "",
-                    "已知数据(JSON):",
-                    JSON.stringify(known)
-                ].join("\n")
-            }];
-
-            let out = '';
-            const stream = this.llmClient.thinkStream(messages);
-            for await (const chunk of stream) {
-                out += chunk;
-                if (out.length > 2000) break;
-            }
-            const picked = String(out || '').trim().split('\n')[0].trim();
-            const finalPicked = picked && picked.toUpperCase() !== 'UNKNOWN' ? picked : 'UNKNOWN';
-
-            const cleaned = this._cleanAiAnswer(finalPicked, field);
-            const validation = this._validateAnswer(cleaned, field);
-            return {
-                success: true,
-                type: 'finish',
-                answer: cleaned,
-                rawAnswer: picked,
-                validation: validation,
-                confidence: validation.confidence || 0.7
-            };
-                
-        } catch (error) {
-            return {
-                success: false,
-                message: `AI处理出错: ${error.message}`,
-                confidence: 0
-            };
+    _cacheAnswer(field, value) {
+        const key = field.name || field.label;
+        if (value && !this.discoveryCache[key]) {
+            this.discoveryCache[key] = value;
         }
     }
 
     _fuzzyMatchCache(label) {
-        /**
-         * 增强的模糊匹配缓存
-         */
         if (!this.discoveryCache) return null;
         const normalizedLabel = label.toLowerCase();
-        const isArticleNumber =
-            normalizedLabel.includes('文章号') || normalizedLabel.includes('文章编号') || normalizedLabel.includes('文章编码') ||
-            normalizedLabel.includes('articlenumber') || (normalizedLabel.includes('article') && normalizedLabel.includes('number')) ||
-            ((normalizedLabel.includes('编号') || normalizedLabel.includes('编码')) && !normalizedLabel.includes('doi'));
-        const looksLikeDoi = (v) => typeof v === 'string' && /^10\.\d{4,9}\/[-._;()/:A-Z0-9]+$/i.test(v.trim());
         
-        // 优先匹配包含关键词的缓存项
-        for (const [key, value] of Object.entries(this.discoveryCache)) {
-            const normalizedKey = key.toLowerCase();
-            // 检查标签是否包含关键字段标识
-            if (normalizedLabel.includes('venue') || normalizedLabel.includes('conference') || normalizedLabel.includes('journal')) {
-                // 如果缓存的值本身像是期刊或会议名称（包含常见期刊关键词）
-                // 确保 value 是字符串类型
-                if (typeof value === 'string') {
-                    const normalizedValue = value.toLowerCase();
-                    if (normalizedValue.includes('journal') || normalizedValue.includes('conference') || 
-                        normalizedValue.includes('transac') || normalizedValue.includes('proc') || 
-                        normalizedValue.includes('symposium') || normalizedValue.includes('workshop')) {
-                        console.log(`🎯 模糊匹配到期刊/会议信息: ${key} -> ${value}`);
-                        return value;
-                    }
-                }
-            }
+        // 特殊字段：摘要、关键词
+        if (normalizedLabel.includes('摘要') || normalizedLabel.includes('abstract')) {
+            // 尝试从论文元数据中获取摘要
+            const abstractKey = Object.keys(this.discoveryCache).find(k => k.includes('_abstract_for_'));
+            if (abstractKey) return this.discoveryCache[abstractKey];
+        }
+        if (normalizedLabel.includes('关键词') || normalizedLabel.includes('keyword') || normalizedLabel.includes('keywords')) {
+            const keywordsKey = Object.keys(this.discoveryCache).find(k => k.includes('_keywords_for_'));
+            if (keywordsKey) return this.discoveryCache[keywordsKey];
         }
         
-        // 原有的通用模糊匹配逻辑
+        // 原有逻辑：遍历缓存键
         for (const [key, value] of Object.entries(this.discoveryCache)) {
             const normalizedKey = key.toLowerCase();
             if (normalizedLabel.includes(normalizedKey) || normalizedKey.includes(normalizedLabel)) {
-                if (isArticleNumber && (normalizedKey.includes('doi') || looksLikeDoi(value))) continue;
                 return value;
             }
         }
-        
-        // 更宽松的匹配：检查缓存值是否包含标签关键词
-        for (const [key, value] of Object.entries(this.discoveryCache)) {
-            // 确保 value 是字符串类型
-            if (typeof value === 'string') {
-                const normalizedValue = value.toLowerCase();
-                if (normalizedValue.includes(normalizedLabel) || normalizedLabel.includes(normalizedValue)) {
-                    if (isArticleNumber && (String(key).toLowerCase().includes('doi') || looksLikeDoi(value))) continue;
-                    return value;
-                }
-            }
-        }
-        
         return null;
     }
 
@@ -1745,17 +1335,23 @@ Options[选项1 | 选项2]
         // 对于选择框
         const options = field.options || [];
         if (options.length > 0) {
-            prompt += "\n提示：这是一个选择字段，请从以下选项中选择：\n";
-            for (let i = 0; i < Math.min(options.length, 10); i++) { // 显示最多10个选项
+            prompt += "\n⚠️ 这是一个选择题字段，你必须严格从以下选项中选择，不要自行编造任何新选项。只能使用下列选项之一：\n";
+            for (let i = 0; i < Math.min(options.length, 10); i++) {
                 const opt = options[i];
                 const optText = opt.text || opt.value || '';
                 if (optText) {
-                    prompt += `${i + 1}. ${optText}\n`;
+                    prompt += `${i + 1}. ${optText} (值: ${opt.value || optText})\n`;
                 }
             }
             if (options.length > 10) {
                 prompt += `（还有 ${options.length - 10} 个选项未显示）\n`;
             }
+            prompt += "请直接选择最合适的一项，并返回该选项的文本或值。\n";
+        }
+
+        // 格式提示（由LLM在解析时生成）
+        if (field.format_hint && field.format_hint.trim()) {
+            prompt += `\n格式要求：${field.format_hint}`;
         }
         
         return prompt;

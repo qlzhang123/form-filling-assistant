@@ -36,18 +36,14 @@ class FormParser {
             const simplifiedHTML = this._getSimplifiedFormHTML();
             
             const messages = [
-                {
-                    role: 'system',
-                    content: `你是一个 HTML 表单结构分析专家。你的任务是分析给定的 HTML 片段，识别出表单中的字段结构。
+    {
+        role: 'system',
+        content: `你是一个 HTML 表单结构分析专家。你的任务是分析给定的 HTML 片段，识别出表单中的字段结构。
 请特别注意以下几点：
 1. **字段分组**：如果一个字段名（Label）控制多个输入框（Input），请将它们分到一个小组（Group）。
-2. **关系识别**：对于小组内的字段，请识别它们之间的逻辑关系：
-    - **AND**：所有空都需要填写（例如：姓名、电话）。
-    - **OR**：只需填写其中一个（例如：发表日期 A 或 发表日期 B，或者二选一的互斥字段）。
-    - **RANGE**：起始和结束关系（例如：会议日期的开始和结束，年份的起止）。
-    - **TABLE**：表格结构，需要逐行填写。
+2. **关系识别**：对于小组内的字段，请识别它们之间的逻辑关系：AND、OR、RANGE、TABLE。
 3. **表格识别**：对于 HTML 表格（table），请识别为 type="table"，并列出所有可填写的列。
-4. **单选/复选**：视觉上属于同一行或同一组的单选/复选框（如“语言”后的“中文”、“英文”），必须识别为一个单一字段（type="radio" or "checkbox"）。
+4. **格式要求推断**：对于每个字段，请根据其HTML属性（如 placeholder、pattern、title、aria-label、input type、maxlength、minlength 等）以及相邻文本，推断出该字段的填写格式要求，用简洁的自然语言描述（例如："邮箱格式，例如 user@example.com"、"YYYY-MM-DD"、"不超过20个字符"）。将结果放在 format_hint 字段中。
 
 请返回一个 JSON 数组，每个元素可以是一个 **字段 (Field)** 或一个 **组 (Group)**。
 
@@ -57,17 +53,18 @@ class FormParser {
 - label: 字段显示标签
 - category: "fill_in_the_blank" 或 "multiple_choice"
 - options: (可选) 选项列表
+- format_hint: (可选) 字符串，描述字段的格式要求
 
 **组 (Group) 结构**：
 - type: "group"
-- label: 组名（例如 "会议日期", "发表日期"）
+- label: 组名
 - relationship: "and" | "or" | "range"
 - children: [ ... 嵌套的字段或组 ... ]
 
 **表格 (Table) 结构**：
 - type: "table"
 - label: 表格名
-- columns: [ { label: "列名", type: "text/select..." }, ... ]
+- columns: [ { label: "列名", type: "text/select...", format_hint: "..." }, ... ]
 
 HTML 片段如下：
 \`\`\`html
@@ -75,8 +72,8 @@ ${simplifiedHTML}
 \`\`\`
 
 请只返回 JSON 数组，不要包含其他解释。`
-                }
-            ];
+    }
+];
 
             const response = await llmClient.think(messages);
             // 尝试解析 JSON
@@ -524,46 +521,57 @@ ${simplifiedHTML}
         return '';
     }
 
+    // form_parser.js 中替换 _getFieldOptions 方法
     _getFieldOptions(tag) {
-        /**
-         * 获取选择框的选项
-         */
         const options = [];
 
         if (tag.tagName.toLowerCase() === 'select') {
-            const optionTags = tag.querySelectorAll('option');
-            for (const option of optionTags) {
-                options.push({
-                    value: option.getAttribute('value') || '',
-                    text: option.textContent.trim()
-                });
-            }
+            // ... 原有代码不变 ...
         } else if (tag.type === 'radio' || tag.type === 'checkbox') {
-            // 查找同组的所有radio/checkbox
             const fieldName = tag.name;
             if (fieldName) {
                 const allRadios = this.document.querySelectorAll(`input[type="${tag.type}"][name="${fieldName}"]`);
                 for (const radio of allRadios) {
-                    // 查找关联的label
-                    const radioId = radio.getAttribute('id');
                     let labelText = '';
                     
+                    // 1. 通过 for 属性关联的 label
+                    const radioId = radio.getAttribute('id');
                     if (radioId) {
                         const label = this.document.querySelector(`label[for="${radioId}"]`);
-                        labelText = label ? label.textContent.trim() : '';
-                    } else {
-                        // 查找紧邻的label元素
-                        let sibling = radio.nextElementSibling;
-                        while (sibling && sibling.tagName.toLowerCase() === 'label') {
-                            labelText = sibling.textContent.trim();
-                            break;
+                        if (label) labelText = label.textContent.trim();
+                    }
+                    
+                    // 2. 父级 label
+                    if (!labelText && radio.parentElement && radio.parentElement.tagName.toLowerCase() === 'label') {
+                        labelText = radio.parentElement.textContent.trim();
+                    }
+                    
+                    // 3. 查找相邻文本节点或兄弟元素（适用于无 label 的情况）
+                    if (!labelText) {
+                        let sibling = radio.nextSibling;
+                        while (sibling) {
+                            if (sibling.nodeType === Node.TEXT_NODE && sibling.textContent.trim()) {
+                                labelText = sibling.textContent.trim();
+                                break;
+                            } else if (sibling.nodeType === Node.ELEMENT_NODE && sibling.tagName.toLowerCase() !== 'input') {
+                                labelText = sibling.textContent.trim();
+                                if (labelText) break;
+                            }
+                            sibling = sibling.nextSibling;
                         }
                     }
                     
-                    options.push({
-                        value: radio.getAttribute('value') || '',
-                        text: labelText
-                    });
+                    // 4. aria-label 或 title
+                    if (!labelText) {
+                        labelText = radio.getAttribute('aria-label') || radio.title || '';
+                    }
+                    
+                    // 5. 最后回退到 value
+                    if (!labelText) {
+                        labelText = radio.value;
+                    }
+                    
+                    options.push({ value: radio.value, text: labelText });
                 }
             }
         }
