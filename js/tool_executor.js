@@ -280,7 +280,7 @@ class EnhancedToolExecutor {
         // 获取页面元素信息工具
         this.registerTool(
             'GetPageElements',
-            '获取页面上的表单元素信息',
+            '获取页面上的表单元素信息。可以传入 CSS 选择器，也支持通过字段名或标签文本进行智能查找。返回匹配元素的详细信息，包括 select 的所有选项、radio/checkbox 的选项列表等。特别适用于获取某个字段的可选值列表，以便进行匹配选择。例如：GetPageElements["select[name=\'成果类型\']"] 或 GetPageElements["成果类型"] 都可以尝试查找。',
             async (selector) => this.getPageElements(selector)
         );
 
@@ -1227,18 +1227,158 @@ class EnhancedToolExecutor {
                     const results = await chrome.scripting.executeScript({
                         target: { tabId: tabId },
                         func: (sel) => {
-                            const els = Array.from(document.querySelectorAll(sel));
-                            return els.map(el => ({
-                                tagName: el.tagName,
-                                id: el.id,
-                                name: el.name,
-                                type: el.type,
-                                placeholder: el.placeholder,
-                                value: el.value,
-                                required: el.required,
-                                label: el.labels ? Array.from(el.labels).map(l => l.textContent).join(', ') : '',
-                                xpath: document.evaluate('count(./preceding-sibling::*) + 1', el, null, XPathResult.NUMBER_TYPE, null).numberValue
-                            }));
+                            // ========== 增强查找函数 ==========
+                            const findElementByLabel = (labelText) => {
+                                // 1. 通过 .field-row 结构查找
+                                const rows = Array.from(document.querySelectorAll('.field-row'));
+                                for (const row of rows) {
+                                    const labelDiv = row.querySelector('.field-label');
+                                    if (labelDiv) {
+                                        const rawLabel = labelDiv.textContent.trim().replace(/\*/g, '').trim();
+                                        if (rawLabel.includes(labelText) || labelText.includes(rawLabel)) {
+                                            const select = row.querySelector('select');
+                                            if (select) return select;
+                                            const input = row.querySelector('input:not([type="hidden"])');
+                                            if (input) return input;
+                                            const textarea = row.querySelector('textarea');
+                                            if (textarea) return textarea;
+                                        }
+                                    }
+                                }
+                                // 2. 通过 label 标签查找
+                                const labels = Array.from(document.querySelectorAll('label'));
+                                for (const label of labels) {
+                                    const rawLabel = label.textContent.trim().replace(/\*/g, '').trim();
+                                    if (rawLabel.includes(labelText) || labelText.includes(rawLabel)) {
+                                        const id = label.htmlFor;
+                                        if (id) {
+                                            const el = document.getElementById(id);
+                                            if (el) return el;
+                                        }
+                                        const input = label.querySelector('select, input, textarea');
+                                        if (input) return input;
+                                    }
+                                }
+                                return null;
+                            };
+
+                            // 解析选择器，提取可能的标签文本或 name 值
+                            let targetLabel = '';
+                            let targetName = '';
+                            // 1. 如果选择器是纯文本（不含 CSS 特殊字符），视为标签文本
+                            if (/^[a-zA-Z\u4e00-\u9fa5\s]+$/.test(sel)) {
+                                targetLabel = sel.trim();
+                            } else {
+                                // 2. 尝试提取 name 属性值
+                                const nameMatch = sel.match(/name=['"]([^'"]+)['"]/);
+                                if (nameMatch) {
+                                    targetName = nameMatch[1];
+                                } else {
+                                    // 3. 去除 CSS 符号，保留中英文作为标签候选
+                                    const plain = sel.replace(/[^a-zA-Z\u4e00-\u9fa5]/g, '');
+                                    if (plain) targetLabel = plain;
+                                }
+                            }
+
+                            let elements = [];
+
+                            // 1. 直接使用原始选择器查找
+                            try {
+                                elements = Array.from(document.querySelectorAll(sel));
+                            } catch(e) {}
+
+                            // 2. 如果未找到且选择器看起来像 name 属性，直接按 name 查找
+                            if (elements.length === 0 && targetName) {
+                                const byName = document.querySelector(`[name="${targetName}"]`);
+                                if (byName) elements = [byName];
+                            }
+
+                            // 3. 如果仍未找到，尝试通过标签文本查找
+                            if (elements.length === 0 && targetLabel) {
+                                const found = findElementByLabel(targetLabel);
+                                if (found) elements = [found];
+                            }
+
+                            // 4. 兜底：如果是通用选择器，返回所有可见表单元素
+                            if (elements.length === 0 && (sel === 'form input, form select, form textarea' || sel === 'input, select, textarea')) {
+                                elements = Array.from(document.querySelectorAll('input:not([type="hidden"]), select, textarea'));
+                            }
+
+                            // 5. 最后尝试通过属性选择器模糊匹配
+                            if (elements.length === 0 && targetLabel) {
+                                const attrSelectors = [
+                                    `[placeholder*="${targetLabel}"]`,
+                                    `[aria-label*="${targetLabel}"]`,
+                                    `[title*="${targetLabel}"]`
+                                ];
+                                for (const attrSel of attrSelectors) {
+                                    const attrEls = Array.from(document.querySelectorAll(attrSel));
+                                    if (attrEls.length) {
+                                        elements = attrEls;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // 转换为详细格式
+                            return elements.map(el => {
+                                const base = {
+                                    tagName: el.tagName.toLowerCase(),
+                                    id: el.id,
+                                    name: el.name,
+                                    type: el.type,
+                                    placeholder: el.placeholder,
+                                    value: el.value,
+                                    required: el.required,
+                                    label: (() => {
+                                        if (el.id) {
+                                            const label = document.querySelector(`label[for="${el.id}"]`);
+                                            if (label) return label.textContent.trim();
+                                        }
+                                        const parent = el.closest('.field-row');
+                                        if (parent) {
+                                            const labelDiv = parent.querySelector('.field-label');
+                                            if (labelDiv) return labelDiv.textContent.trim();
+                                        }
+                                        return el.getAttribute('aria-label') || '';
+                                    })(),
+                                    xpath: (() => {
+                                        try {
+                                            let path = [];
+                                            let node = el;
+                                            while (node && node.nodeType === Node.ELEMENT_NODE) {
+                                                let index = 0;
+                                                let sibling = node.previousSibling;
+                                                while (sibling) {
+                                                    if (sibling.nodeType === Node.ELEMENT_NODE && sibling.nodeName === node.nodeName) {
+                                                        index++;
+                                                    }
+                                                    sibling = sibling.previousSibling;
+                                                }
+                                                const tag = node.nodeName.toLowerCase();
+                                                const nth = index > 0 ? `[${index + 1}]` : '';
+                                                path.unshift(tag + nth);
+                                                node = node.parentNode;
+                                            }
+                                            return '/' + path.join('/');
+                                        } catch(e) { return ''; }
+                                    })()
+                                };
+                                if (el.tagName.toLowerCase() === 'select') {
+                                    base.options = Array.from(el.options).map(opt => ({
+                                        value: opt.value,
+                                        text: opt.textContent.trim(),
+                                        selected: opt.selected
+                                    }));
+                                } else if (el.type === 'radio' || el.type === 'checkbox') {
+                                    base.options = [{
+                                        value: el.value,
+                                        text: el.getAttribute('aria-label') || (el.nextSibling && el.nextSibling.textContent) || '',
+                                        checked: el.checked
+                                    }];
+                                }
+                                return base;
+                            });
                         },
                         args: [selector]
                     });
@@ -1256,23 +1396,144 @@ class EnhancedToolExecutor {
     }
 
     _getPageElementsFromCurrentPage(selector) {
-        /**
-         * 从当前页面获取元素信息（辅助方法）
-         */
-        const elements = Array.from(document.querySelectorAll(selector));
-        return elements.map(el => ({
-            tagName: el.tagName.toLowerCase(),
-            id: el.id,
-            name: el.name,
-            type: el.type,
-            placeholder: el.placeholder,
-            value: el.value,
-            required: el.hasAttribute('required'),
-            readonly: el.hasAttribute('readonly'),
-            disabled: el.hasAttribute('disabled'),
-            label: this._getElementLabel(el),
-            xpath: this._getElementXPath(el)
-        }));
+        // 复用相同的查找逻辑（与注入脚本中的函数类似）
+        const findElementByLabel = (labelText) => {
+            const rows = Array.from(document.querySelectorAll('.field-row'));
+            for (const row of rows) {
+                const labelDiv = row.querySelector('.field-label');
+                if (labelDiv) {
+                    const rawLabel = labelDiv.textContent.trim().replace(/\*/g, '').trim();
+                    if (rawLabel.includes(labelText) || labelText.includes(rawLabel)) {
+                        const select = row.querySelector('select');
+                        if (select) return select;
+                        const input = row.querySelector('input:not([type="hidden"])');
+                        if (input) return input;
+                        const textarea = row.querySelector('textarea');
+                        if (textarea) return textarea;
+                    }
+                }
+            }
+            const labels = Array.from(document.querySelectorAll('label'));
+            for (const label of labels) {
+                const rawLabel = label.textContent.trim().replace(/\*/g, '').trim();
+                if (rawLabel.includes(labelText) || labelText.includes(rawLabel)) {
+                    const id = label.htmlFor;
+                    if (id) {
+                        const el = document.getElementById(id);
+                        if (el) return el;
+                    }
+                    const input = label.querySelector('select, input, textarea');
+                    if (input) return input;
+                }
+            }
+            return null;
+        };
+
+        let targetLabel = '';
+        let targetName = '';
+        if (/^[a-zA-Z\u4e00-\u9fa5\s]+$/.test(selector)) {
+            targetLabel = selector.trim();
+        } else {
+            const nameMatch = selector.match(/name=['"]([^'"]+)['"]/);
+            if (nameMatch) targetName = nameMatch[1];
+            else {
+                const plain = selector.replace(/[^a-zA-Z\u4e00-\u9fa5]/g, '');
+                if (plain) targetLabel = plain;
+            }
+        }
+
+        let elements = [];
+        try {
+            elements = Array.from(document.querySelectorAll(selector));
+        } catch(e) {}
+
+        if (elements.length === 0 && targetName) {
+            const byName = document.querySelector(`[name="${targetName}"]`);
+            if (byName) elements = [byName];
+        }
+
+        if (elements.length === 0 && targetLabel) {
+            const found = findElementByLabel(targetLabel);
+            if (found) elements = [found];
+        }
+
+        if (elements.length === 0 && (selector === 'form input, form select, form textarea' || selector === 'input, select, textarea')) {
+            elements = Array.from(document.querySelectorAll('input:not([type="hidden"]), select, textarea'));
+        }
+
+        if (elements.length === 0 && targetLabel) {
+            const attrSelectors = [
+                `[placeholder*="${targetLabel}"]`,
+                `[aria-label*="${targetLabel}"]`,
+                `[title*="${targetLabel}"]`
+            ];
+            for (const attrSel of attrSelectors) {
+                const attrEls = Array.from(document.querySelectorAll(attrSel));
+                if (attrEls.length) {
+                    elements = attrEls;
+                    break;
+                }
+            }
+        }
+
+        return elements.map(el => {
+            const base = {
+                tagName: el.tagName.toLowerCase(),
+                id: el.id,
+                name: el.name,
+                type: el.type,
+                placeholder: el.placeholder,
+                value: el.value,
+                required: el.required,
+                label: (() => {
+                    if (el.id) {
+                        const label = document.querySelector(`label[for="${el.id}"]`);
+                        if (label) return label.textContent.trim();
+                    }
+                    const parent = el.closest('.field-row');
+                    if (parent) {
+                        const labelDiv = parent.querySelector('.field-label');
+                        if (labelDiv) return labelDiv.textContent.trim();
+                    }
+                    return el.getAttribute('aria-label') || '';
+                })(),
+                xpath: (() => {
+                    try {
+                        let path = [];
+                        let node = el;
+                        while (node && node.nodeType === Node.ELEMENT_NODE) {
+                            let index = 0;
+                            let sibling = node.previousSibling;
+                            while (sibling) {
+                                if (sibling.nodeType === Node.ELEMENT_NODE && sibling.nodeName === node.nodeName) {
+                                    index++;
+                                }
+                                sibling = sibling.previousSibling;
+                            }
+                            const tag = node.nodeName.toLowerCase();
+                            const nth = index > 0 ? `[${index + 1}]` : '';
+                            path.unshift(tag + nth);
+                            node = node.parentNode;
+                        }
+                        return '/' + path.join('/');
+                    } catch(e) { return ''; }
+                })()
+            };
+            if (el.tagName.toLowerCase() === 'select') {
+                base.options = Array.from(el.options).map(opt => ({
+                    value: opt.value,
+                    text: opt.textContent.trim(),
+                    selected: opt.selected
+                }));
+            } else if (el.type === 'radio' || el.type === 'checkbox') {
+                base.options = [{
+                    value: el.value,
+                    text: el.getAttribute('aria-label') || (el.nextSibling && el.nextSibling.textContent) || '',
+                    checked: el.checked
+                }];
+            }
+            return base;
+        });
     }
 
     _getElementLabel(element) {

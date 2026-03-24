@@ -51,6 +51,8 @@ const REACT_PROMPT_TEMPLATE = `
   * 如果只需要论文标题和作者： GetPaperDetailsSemanticScholar[{"title": "...", "fields": ["title", "authors"]}]
   * 如果只需要会议名称和年份： GetWorkOpenAlex[{"doi": "...", "select": ["title", "publication_year", "primary_location"]}]
   * 如果只需要关键词： GetPaperDetailsSemanticScholar[{"doi": "...", "fields": ["fieldsOfStudy"]}]
+  * **如果需要获取表单字段的可选项（如下拉框、单选按钮）： GetPageElements["select[name='论文类别']"]**
+  * 如果 GetPageElements 返回的 elements 为空，可以尝试 GetPageElements["select"] 获取所有下拉框，然后根据选项内容进行匹配。
 - 不要重复调用同一个工具获取相同数据，尽量利用上下文中的缓存。
 - 如果某个 API 返回 429 错误（请求过于频繁），请尝试使用其他数据源（如 CrossRef 或 OpenAlex）进行查询。
 - 在调用工具时，务必使用 fields 或 select 参数只请求需要的字段，以节省请求次数。
