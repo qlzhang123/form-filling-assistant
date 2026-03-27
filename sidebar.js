@@ -3,11 +3,10 @@
  */
 
 import { DeepSeekLLM } from './js/llm_client.js';
-import { ToolExecutor, ReActAgent } from './js/react_agent.js';
 import { FormFillingAgent } from './js/form_agent.js';
 import { EnhancedToolExecutor } from './js/tool_executor.js';
 import { FormParser } from './js/form_parser.js';
-import { unifiedSearchAuthors, unifiedGetPublications, getPaperByDOI, getPaperByDOIAllSources, unifiedSearchPapers, searchConferenceEventDate } from './js/api_client.js';
+import { unifiedSearchAuthors, unifiedGetPublications, getPaperByDOI,  unifiedSearchPapers, searchConferenceEventDate } from './js/api_client.js';
 import { getSemanticScholarPaperByDoi, getCrossrefPaperByDoi, getOpenAlexPaperByDoi } from './js/api_client.js';
 class FormFillingSidebar {
     constructor() {

@@ -10,20 +10,6 @@ class FormParser {
         this.document = null;
     }
 
-    async loadForm(url, loginInfo = null) {
-        /**
-         * 加载网页表单 - 在浏览器扩展环境中，我们直接分析当前页面
-         */
-        try {
-            // 在content script中，我们可以直接访问当前页面的DOM
-            this.document = document;
-            return true;
-        } catch (e) {
-            console.error(`❌ 加载网页失败: ${e}`);
-            return false;
-        }
-    }
-
     async analyzeFormStructureViaLLM(llmClient) {
         /**
          * 使用 LLM 分析页面 HTML 结构以识别字段类型和分组

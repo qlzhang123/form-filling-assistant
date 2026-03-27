@@ -1,4 +1,4 @@
-import { searchPublications, searchAuthors, getPublicationByKey, getAuthorByPid } from './dblp_api.js';
+import {  searchAuthors, getPublicationByKey, getAuthorByPid } from './dblp_api.js';
 import { searchConferenceLocation, searchConferenceOrganizers, searchConferenceEventDate,fetchWithRetry, APIS, normalizeDoi } from './api_client.js';
 import { 
     SEMANTIC_SCHOLAR_PAPER_SCHEMA, 
@@ -70,15 +70,6 @@ class EnhancedToolExecutor {
          * 根据名称获取一个工具的执行函数。
          */
         return this.tools[name] ? this.tools[name].func : null;
-    }
-
-    getAvailableTools() {
-        /**
-         * 获取所有可用工具的格式化描述字符串。
-         */
-        return Object.entries(this.tools)
-            .map(([name, info]) => `- ${name}: ${info.description}`)
-            .join('\n');
     }
 
     // 在 EnhancedToolExecutor 类中添加以下方法
@@ -634,168 +625,6 @@ class EnhancedToolExecutor {
         }
     }
 
-    async academicSearch(query) {
-        /**
-         * 学术搜索工具
-         */
-        try {
-            // 清理查询词，移除可能的引号
-            query = query.replace(/^["']|["']$/g, '').trim();
-            
-            // 构建搜索URL
-            const searchUrl = `https://dblp.org/search?q=${encodeURIComponent(query)}`;
-            
-            let tab;
-            // 在新标签页中打开搜索结果
-            if (this.browserController) {
-                tab = await this.browserController.openSearchPage(query, 'dblp');
-            } else {
-                // 如果没有浏览器控制器，模拟打开
-                window.open(searchUrl, '_blank');
-            }
-            
-            // 模拟返回搜索结果（实际上搜索页面已经打开）
-            return {
-                success: true,
-                message: `已在标签页 ${tab ? tab.id : '未知'} 中打开 DBLP 搜索页面。关键词: "${query}"。请立即执行 'ExtractPageContent[${tab ? tab.id : 'ID'}]'。`,
-                searchUrl: searchUrl,
-                tabId: tab ? tab.id : null
-            };
-        } catch (error) {
-            return {
-                success: false,
-                message: `学术搜索失败: ${error.message}`
-            };
-        }
-    }
-
-    async searchAuthor(authorName) {
-        /**
-         * 搜索作者工具
-         */
-        try {
-            // 清理查询词
-            authorName = authorName.replace(/^["']|["']$/g, '').trim();
-            
-            let tab;
-            if (this.browserController) {
-                tab = await this.browserController.openSearchPage(`author:${authorName}`, 'dblp');
-            } else {
-                window.open(`https://dblp.org/search?q=author:${encodeURIComponent(authorName)}`, '_blank');
-            }
-            
-            return {
-                success: true,
-                message: `已在标签页 ${tab ? tab.id : '未知'} 中打开 DBLP 作者搜索页面。作者: "${authorName}"。请立即执行 'ExtractPageContent[${tab ? tab.id : 'ID'}]' 来查找正确的作者主页链接。`,
-                tabId: tab ? tab.id : null
-            };
-        } catch (error) {
-            return {
-                success: false,
-                message: `作者搜索失败: ${error.message}`
-            };
-        }
-    }
-
-    async webSearch(query) {
-        /**
-         * 网页搜索工具
-         */
-        try {
-            // 清理查询词，移除可能的引号
-            query = query.replace(/^["']|["']$/g, '').trim();
-            
-            // 构建搜索URL
-            const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
-            
-            let tab;
-            // 在新标签页中打开搜索结果
-            if (this.browserController) {
-                tab = await this.browserController.openSearchPage(query, 'google');
-            } else {
-                window.open(searchUrl, '_blank');
-            }
-            
-            return {
-                success: true,
-                message: `已在标签页 ${tab ? tab.id : '未知'} 中打开 Google 搜索页面。关键词: "${query}"。请立即执行 'ExtractPageContent[${tab ? tab.id : 'ID'}]'。`,
-                searchUrl: searchUrl,
-                tabId: tab ? tab.id : null
-            };
-        } catch (error) {
-            return {
-                success: false,
-                message: `网页搜索失败: ${error.message}`
-            };
-        }
-    }
-
-    async extractPageContent(params = {}) {
-        /**
-         * 提取页面内容工具
-         */
-        try {
-            let content;
-            let targetTabId = null;
-            
-            // 解析参数：支持多种形式
-            // 1. 直接传入数字: ExtractPageContent(1202095641)
-            // 2. 传入字符串数字: ExtractPageContent("1202095641") ← AI 常用
-            // 3. 传入对象: ExtractPageContent({tabId: 1202095641})
-            if (typeof params === 'number') {
-                targetTabId = params;
-            } else if (typeof params === 'string') {
-                // 尝试将字符串解析为数字
-                const parsed = parseInt(params, 10);
-                if (!isNaN(parsed)) {
-                    targetTabId = parsed;
-                }
-            } else if (params && typeof params === 'object' && params.tabId) {
-                targetTabId = typeof params.tabId === 'number' ? params.tabId : parseInt(params.tabId, 10);
-            }
-            
-            if (this.browserController) {
-                // 优先使用传入的 tabId
-                if (targetTabId && !isNaN(targetTabId)) {
-                    console.log(`ExtractPageContent: 使用指定的标签页 ID ${targetTabId}`);
-                    content = await this.browserController.analyzePageContent(targetTabId);
-                } else {
-                    // 并行安全检查：如果未指定 tabId 且当前有多个临时搜索标签页，提示 Agent
-                    const tempTabs = Array.from(this.browserController.tempTabIds);
-                    if (tempTabs.length > 1) {
-                        return {
-                            success: false,
-                            message: `错误：当前有多个活动搜索标签页 [${tempTabs.join(', ')}]。你必须显式指定要提取的 tabId（如 ExtractPageContent[${tempTabs[0]}]），否则会读取到错误任务的数据。`
-                        };
-                    }
-                    
-                    // 如果没有传入 tabId，才使用当前活动标签页
-                    console.log('ExtractPageContent: 未指定标签页 ID，使用当前活动标签页');
-                    const currentTab = await this.browserController.getCurrentTab();
-                    if (currentTab) {
-                        content = await this.browserController.analyzePageContent(currentTab.id);
-                    } else {
-                        // 如果无法获取当前标签页，使用当前页面内容
-                        content = this._extractCurrentPageContent();
-                    }
-                }
-            } else {
-                // 在非扩展环境中，直接提取当前页面内容
-                content = this._extractCurrentPageContent();
-            }
-            
-            return {
-                success: true,
-                message: '页面内容提取成功',
-                content: content
-            };
-        } catch (error) {
-            return {
-                success: false,
-                message: `页面内容提取失败: ${error.message}`
-            };
-        }
-    }
 
     _extractCurrentPageContent() {
         /**
@@ -1535,66 +1364,7 @@ class EnhancedToolExecutor {
             return base;
         });
     }
-
-    _getElementLabel(element) {
-        /**
-         * 获取元素的标签文本（辅助方法）
-         */
-        // 通过for属性查找label
-        if (element.id) {
-            const label = document.querySelector(`label[for="${element.id}"]`);
-            if (label) {
-                return label.textContent.trim();
-            }
-        }
-        
-        // 查找父级label
-        let parent = element.parentElement;
-        while (parent && parent.tagName.toLowerCase() !== 'form') {
-            const label = parent.querySelector('label');
-            if (label && label.contains(element)) {
-                return label.textContent.trim();
-            }
-            parent = parent.parentElement;
-        }
-        
-        return element.getAttribute('aria-label') || element.title || '';
-    }
-
-    _getElementXPath(element) {
-        /**
-         * 获取元素的XPath（辅助方法）
-         */
-        if (element.id) {
-            return `//*[@id="${element.id}"]`;
-        }
-
-        const parts = [];
-        while (element && element.nodeType === Node.ELEMENT_NODE) {
-            let nbOfPreviousSiblings = 0;
-            let hasNextSiblings = false;
-            let sibling = element.previousSibling;
-            while (sibling) {
-                if (sibling.nodeType === Node.ELEMENT_NODE && sibling.nodeName === element.nodeName) {
-                    nbOfPreviousSiblings++;
-                }
-                sibling = sibling.previousSibling;
-            }
-            sibling = element.nextSibling;
-            while (sibling) {
-                if (sibling.nodeType === Node.ELEMENT_NODE && sibling.nodeName === element.nodeName) {
-                    hasNextSiblings = true;
-                    break;
-                }
-                sibling = sibling.nextSibling;
-            }
-            const prefix = element.nodeName.toLowerCase();
-            const nth = nbOfPreviousSiblings || hasNextSiblings ? `[${nbOfPreviousSiblings + 1}]` : '';
-            parts.push(prefix + nth);
-            element = element.parentNode;
-        }
-        return '/' + parts.reverse().join('/');
-    }
+    
 }
 
 export { EnhancedToolExecutor };

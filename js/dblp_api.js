@@ -92,55 +92,6 @@ async function fetchDBLP(url, retries = 3, initialDelay = 2000) {
     throw lastError || new Error('DBLP API 请求失败');
 }
 
-// 搜索论文（返回简化列表，支持分页）
-export async function searchPublications(query, offset = 0, limit = 10) {
-    const url = `${DBLP_SEARCH_PUBL}?q=${encodeURIComponent(query)}&h=${limit}&f=${offset}&format=json`;
-    try {
-        const data = await fetchDBLP(url);
-        const hits = data.result?.hits?.hit || [];
-        const total = parseInt(data.result?.hits?.['@total'] || 0);
-        
-        return {
-            total: total,
-            source: 'DBLP',
-            items: hits.map(hit => {
-                const info = hit.info;
-                // 处理作者列表，可能是一个对象或数组
-                let authors = [];
-                if (info.authors && info.authors.author) {
-                    if (Array.isArray(info.authors.author)) {
-                        authors = info.authors.author.map(a => a.text || a);
-                    } else {
-                        authors = [info.authors.author.text || info.authors.author];
-                    }
-                }
-                
-                return {
-                    title: info.title,
-                    authors: authors,
-                    venue: info.venue,
-                    year: info.year,
-                    type: info.type,
-                    key: info.key,
-                    doi: info.doi,
-                    url: info.url,
-                    ee: info.ee
-                };
-            })
-        };
-    } catch (e) {
-        console.error('DBLP Search Error:', e);
-        // 如果是 503 或 429 错误，尝试降级到 Semantic Scholar
-        if (e.message.includes('503') || e.message.includes('429') || e.message.includes('HTML')) {
-             console.log('🔄 DBLP 服务不可用，尝试切换到 Semantic Scholar...');
-             return await searchPublicationsSemanticScholar(query, offset, limit);
-        }
-
-        // 返回空结果而不是抛出异常，以免中断流程
-        return { total: 0, items: [], error: e.message };
-    }
-}
-
 // 降级方案：使用 Semantic Scholar 搜索
 async function searchPublicationsSemanticScholar(query, offset = 0, limit = 10) {
     // Semantic Scholar API 需要 query, offset, limit

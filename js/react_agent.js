@@ -1,42 +1,3 @@
-/**
- * JavaScript ReAct智能体实现
- */
-
-class ToolExecutor {
-    /**
-     * 一个工具执行器，负责管理和执行工具。
-     */
-    constructor() {
-        this.tools = {};
-    }
-
-    registerTool(name, description, func) {
-        /**
-         * 向工具箱中注册一个新工具。
-         */
-        if (name in this.tools) {
-            console.warn(`警告:工具 '${name}' 已存在，将被覆盖。`);
-        }
-        this.tools[name] = {"description": description, "func": func};
-        console.log(`工具 '${name}' 已注册。`);
-    }
-
-    getTool(name) {
-        /**
-         * 根据名称获取一个工具的执行函数。
-         */
-        return this.tools[name] ? this.tools[name].func : null;
-    }
-
-    getAvailableTools() {
-        /**
-         * 获取所有可用工具的格式化描述字符串。
-         */
-        return Object.entries(this.tools)
-            .map(([name, info]) => `- ${name}: ${info.description}`)
-            .join('\n');
-    }
-}
 
 const REACT_PROMPT_TEMPLATE = `
 你是一个智能填表助手，能够调用外部工具来获取信息。
@@ -284,4 +245,4 @@ class ReActAgent {
     }
 }
 
-export { ToolExecutor, ReActAgent };
+export {ReActAgent };

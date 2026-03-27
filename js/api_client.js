@@ -1068,41 +1068,6 @@ export async function getPaperByDOI(doi) {
     return { success: false, message: '未找到该 DOI 的论文详情' };
 }
 
-export async function getPaperByDOIAllSources(doi, options = {}) {
-    const d = normalizeDoi(doi);
-    if (!d) return { success: false, message: 'DOI 为空' };
-
-    const out = { success: false, doi: d, sources: {} };
-    const neededFields = options.fields || ['title', 'authors', 'venue', 'year', 'doi', 'url']; // 默认基础字段
-    const wait = (ms) => new Promise(r => setTimeout(r, ms));
-
-    // 按优先级串行请求：OpenAlex（限流宽松） -> Semantic Scholar（可能有限流） -> CrossRef
-    try {
-        const paper = await getOpenAlexPaperByDoi(d, neededFields);
-        out.sources.openalex = paper;
-        out.success = true;
-        await wait(500); // 请求间隔
-    } catch (e) {}
-    if (!out.success) {
-        try {
-            const paper = await getSemanticScholarPaperByDoi(d, neededFields);
-            out.sources.semanticScholar = paper;
-            out.success = true;
-            await wait(500);
-        } catch (e) {}
-    }
-    if (!out.success) {
-        try {
-            const paper = await getCrossrefPaperByDoi(d, neededFields);
-            out.sources.crossref = paper;
-            out.success = true;
-        } catch (e) {}
-    }
-
-    if (!out.success) out.message = '未找到该 DOI 的论文详情';
-    return out;
-}
-
 export async function unifiedSearchPapers(query, offset = 0, limit = 20, filters = {}, requiredFields = []) {
     const q = String(query || '').trim();
     if (!q) return { total: 0, items: [], error: '空查询' };
