@@ -12,12 +12,6 @@ class FormFillingContentScript {
     initialize() {
         console.log('填表助手内容脚本初始化...');
         
-        // 注入字段标签映射到页面
-        this.injectFieldLabelMap();
-        
-        // 监听来自侧边栏的消息
-        this.setupMessageListener();
-        
         // 监听来自background script的消息
         if (typeof chrome !== 'undefined' && chrome.runtime) {
             chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -31,71 +25,6 @@ class FormFillingContentScript {
         console.log('填表助手内容脚本连接成功');
     }
 
-    injectFieldLabelMap() {
-        /**
-         * 注入字段标签映射到页面，供脚本使用
-         */
-        if (!window.fieldLabelMap) {
-            window.fieldLabelMap = {
-                'name': '姓名',
-                'email': '邮箱',
-                'phone': '电话',
-                'tel': '电话',
-                'mobile': '手机',
-                'address': '地址',
-                'title': '标题',
-                'first-name': '名字',
-                'last-name': '姓氏',
-                'full-name': '全名',
-                'organization': '机构',
-                'institution': '机构',
-                'department': '部门',
-                'position': '职位',
-                'job-title': '职务',
-                'affiliation': '单位',
-                'website': '网站',
-                'url': '网址',
-                'bio': '简介',
-                'research': '研究',
-                'interests': '兴趣',
-                'specialization': '专业',
-                'degree': '学位',
-                'major': '专业',
-                'school': '学校',
-                'university': '大学',
-                'college': '学院',
-                'subject': '主题',
-                'topic': '主题',
-                'abstract': '摘要',
-                'summary': '摘要',
-                'comments': '备注',
-                'notes': '备注',
-                'message': '留言',
-                'agree': '同意',
-                'accept': '接受',
-                'terms': '条款',
-                'privacy': '隐私政策'
-            };
-        }
-    }
-
-    setupMessageListener() {
-        /**
-         * 设置消息监听器
-         */
-        // 监听来自侧边栏的消息（通过DOM事件）
-        document.addEventListener('formFillingMessage', (event) => {
-            const { action, data } = event.detail;
-            this.handleMessage({ action, data }, null, (response) => {
-                // 发送响应回侧边栏
-                const responseEvent = new CustomEvent('formFillingResponse', { 
-                    detail: { id: event.detail.id, response } 
-                });
-                document.dispatchEvent(responseEvent);
-            });
-        });
-    }
-
     handleMessage(request, sender, sendResponse) {
         /**
          * 处理收到的消息
@@ -105,24 +34,12 @@ class FormFillingContentScript {
         console.log('收到消息:', action, data);
         
         switch (action) {
-            case 'parseForm':
-                this.parseForm(sendResponse);
-                break;
-                
             case 'fillFormField':
                 this.fillFormField(data.fieldName, data.value, sendResponse);
                 break;
                 
-            case 'extractPageContent':
-                this.extractPageContent(sendResponse);
-                break;
-                
             case 'getPageElements':
                 this.getPageElements(data.selector || 'form input, form select, form textarea', sendResponse);
-                break;
-                
-            case 'executeCustomScript':
-                this.executeCustomScript(data.script, data.args, sendResponse);
                 break;
                 
             case 'getPageContent':
@@ -144,23 +61,6 @@ class FormFillingContentScript {
                 sendResponse({ success: false, message: `未知的动作: ${action}` });
                 break;
         }
-    }
-
-    generateFieldName(element) {
-        /**
-         * 生成字段名称
-         */
-        if (element.id) return element.id;
-        if (element.name) return element.name;
-        
-        // 根据标签或其他属性生成名称
-        const label = this.getElementLabel(element);
-        if (label) {
-            return label.replace(/\s+/g, '-').toLowerCase();
-        }
-        
-        // 生成唯一标识符
-        return `field_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     }
 
     getElementLabel(element) {
@@ -219,44 +119,6 @@ class FormFillingContentScript {
                element.title || 
                element.placeholder || 
                '';
-    }
-
-    getFieldOptions(input) {
-        /**
-         * 获取字段选项（主要用于select、radio、checkbox）
-         */
-        if (input.tagName.toLowerCase() === 'select') {
-            return Array.from(input.querySelectorAll('option')).map(option => ({
-                value: option.value,
-                text: option.textContent.trim(),
-                selected: option.selected
-            }));
-        } else if (input.type === 'radio' || input.type === 'checkbox') {
-            // 对于同名的单选/复选框组
-            const groupInputs = document.querySelectorAll(`input[name="${input.name}"]`);
-            return Array.from(groupInputs).map(groupInput => ({
-                value: groupInput.value,
-                text: this.getElementLabel(groupInput),
-                checked: groupInput.checked
-            }));
-        }
-        return [];
-    }
-
-    getValidationRules(input) {
-        /**
-         * 获取验证规则
-         */
-        return {
-            required: input.hasAttribute('required'),
-            pattern: input.getAttribute('pattern') || null,
-            minLength: input.getAttribute('minlength') || null,
-            maxLength: input.getAttribute('maxlength') || null,
-            min: input.getAttribute('min') || null,
-            max: input.getAttribute('max') || null,
-            step: input.getAttribute('step') || null,
-            type: input.type
-        };
     }
 
     parseDateString(value) {
@@ -818,71 +680,6 @@ class FormFillingContentScript {
         }
     }
 
-    extractPageContent(sendResponse) {
-        /**
-         * 提取页面内容
-         */
-        try {
-            const content = {
-                title: document.title,
-                url: window.location.href,
-                headings: Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6'))
-                             .map(el => el.textContent.trim())
-                             .filter(text => text.length > 0),
-                paragraphs: Array.from(document.querySelectorAll('p'))
-                               .map(el => el.textContent.trim())
-                               .filter(text => text.length > 20)
-                               .slice(0, 20), // 限制数量
-                links: Array.from(document.querySelectorAll('a[href]'))
-                          .map(a => ({ 
-                              text: a.textContent.trim(), 
-                              href: a.href,
-                              title: a.title
-                          }))
-                          .filter(a => a.text && a.href)
-                          .slice(0, 20),
-                forms: Array.from(document.querySelectorAll('form'))
-                         .map(form => ({
-                             action: form.action,
-                             method: form.method,
-                             id: form.id,
-                             inputs: Array.from(form.querySelectorAll('input, select, textarea'))
-                                       .map(input => ({
-                                           name: input.name || input.id,
-                                           type: input.type,
-                                           value: input.value,
-                                           required: input.hasAttribute('required'),
-                                           placeholder: input.placeholder
-                                       }))
-                         })),
-                images: Array.from(document.querySelectorAll('img[src]'))
-                            .map(img => ({ 
-                                src: img.src, 
-                                alt: img.alt,
-                                title: img.title 
-                            }))
-                            .slice(0, 10),
-                metadata: {
-                    description: document.querySelector('meta[name="description"]')?.content || '',
-                    keywords: document.querySelector('meta[name="keywords"]')?.content || '',
-                    author: document.querySelector('meta[name="author"]')?.content || '',
-                    viewport: document.querySelector('meta[name="viewport"]')?.content || ''
-                },
-                timestamp: new Date().toISOString()
-            };
-            
-            sendResponse({
-                success: true,
-                content: content
-            });
-        } catch (error) {
-            sendResponse({
-                success: false,
-                message: `提取页面内容失败: ${error.message}`
-            });
-        }
-    }
-
     getPageElements(selector, sendResponse) {
         /**
          * 获取页面元素信息
@@ -962,37 +759,6 @@ class FormFillingContentScript {
                style.visibility !== 'hidden' && 
                style.display !== 'none' &&
                !element.disabled;
-    }
-
-    executeCustomScript(script, args, sendResponse) {
-        /**
-         * 执行自定义脚本
-         */
-        try {
-            // 注意：在内容脚本中不能直接eval，因为CSP策略通常禁止
-            // 我们需要通过更安全的方式执行
-            const result = this.safeExecuteScript(script, args);
-            sendResponse({
-                success: true,
-                result: result
-            });
-        } catch (error) {
-            sendResponse({
-                success: false,
-                message: `执行脚本失败: ${error.message}`
-            });
-        }
-    }
-
-    safeExecuteScript(script, args) {
-        /**
-         * 安全执行脚本的辅助方法
-         * 这里只是示例，实际应用中需要更严格的安全措施
-         */
-        // 由于安全限制，我们只能执行预定义的函数
-        // 在实际应用中，应该只允许执行白名单中的操作
-        console.warn('安全警告：不允许执行任意脚本');
-        return '由于安全限制，无法执行自定义脚本';
     }
 
     /**
