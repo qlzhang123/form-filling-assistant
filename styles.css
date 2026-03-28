@@ -220,6 +220,17 @@ body {
     line-height: 1.5;
 }
 
+.thinking-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+    justify-content: flex-end;
+}
+
+.thinking-actions .btn {
+    min-width: 108px;
+}
+
 #aiThinkingContent {
     white-space: pre-wrap;
     word-break: break-word;

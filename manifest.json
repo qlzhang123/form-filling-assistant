@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "智能填表助手",
   "version": "1.0",
-  "description": "集成DeepSeek AI的智能表单填写助手",
+  "description": "集成 DeepSeek AI 的智能表单填写助手",
   "permissions": [
     "activeTab",
     "storage",
@@ -11,6 +11,7 @@
     "tabs"
   ],
   "host_permissions": [
+    "http://127.0.0.1:11235/*",
     "https://api.deepseek.com/*",
     "http://*/*",
     "https://*/*"
@@ -23,8 +24,13 @@
   },
   "content_scripts": [
     {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["content_script.js"],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content_script.js"
+      ],
       "run_at": "document_idle"
     }
   ],
@@ -34,12 +40,14 @@
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
-  
   "web_accessible_resources": [
     {
-      "resources": ["data/*.json"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "data/*.json"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ]
-
 }

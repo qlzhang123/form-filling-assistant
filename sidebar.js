@@ -6,6 +6,8 @@ import { DeepSeekLLM } from './js/llm_client.js';
 import { FormFillingAgent } from './js/form_agent.js';
 import { EnhancedToolExecutor } from './js/tool_executor.js';
 import { FormParser } from './js/form_parser.js';
+import { fetchCrawl4AIPageContent } from './js/crawl4ai_client.js';
+import { extractFormFieldsFromHtml } from './js/schema_extractor_adapter.js';
 import { unifiedSearchAuthors, unifiedGetPublications, getPaperByDOI,  unifiedSearchPapers, searchConferenceEventDate } from './js/api_client.js';
 import { getSemanticScholarPaperByDoi, getCrossrefPaperByDoi, getOpenAlexPaperByDoi } from './js/api_client.js';
 class FormFillingSidebar {
@@ -35,6 +37,7 @@ class FormFillingSidebar {
         this.batchProcessedGroups = new Set(); // 存储已通过批量方式处理过的群组索引
         this.currentBatchPattern = null; // 当前正在处理的批量模式
         this.batchExecutionCancelled = false;
+        this.activeAIRequestId = 0;
         
         // 作者搜索相关状态
         this.currentAuthor = '';
@@ -248,6 +251,8 @@ class FormFillingSidebar {
         
         this.aiThinkingDisplay = document.getElementById('aiThinkingDisplay');
         this.aiThinkingContent = document.getElementById('aiThinkingContent');
+        this.skipThinkingBtn = document.getElementById('skipThinkingBtn');
+        this.quitThinkingBtn = document.getElementById('quitThinkingBtn');
         this.optionsDisplay = document.getElementById('optionsDisplay');
         
         // AI推荐区域
@@ -365,7 +370,9 @@ class FormFillingSidebar {
         this.editAiRecommendationBtn?.addEventListener('click', () => this.editAiRecommendation());
         this.useManualInputBtn?.addEventListener('click', () => this.useManualInput());
         this.skipFieldBtn?.addEventListener('click', () => this.skipCurrentField());
+        this.skipThinkingBtn?.addEventListener('click', () => this.skipCurrentField());
         this.quitFillingBtn?.addEventListener('click', () => this.quitFilling());
+        this.quitThinkingBtn?.addEventListener('click', () => this.quitFilling());
         
         // 填表控制事件
         this.startFillingBtn?.addEventListener('click', () => this.startFillingProcess());
@@ -572,73 +579,179 @@ class FormFillingSidebar {
         this.setStatus('正在获取页面内容...', 'searching');
         
         try {
-            // 1. 获取页面 HTML
-            const response = await this.sendMessageToBackground({
-                action: 'parseForm',
-                data: { url: url }
-            });
-            
-            if (!response.success) {
-                this.setStatus('获取页面失败: ' + response.message, 'error');
+            let fields = null;
+            let formStructure = null;
+            let useCrawl4AI = false;
+
+            const crawlData = await fetchCrawl4AIPageContent(url);
+            if (crawlData && crawlData.html) {
+                console.log('✅ 使用 Crawl4AI 获取页面成功，长度:', crawlData.html.length);
+                useCrawl4AI = true;
+                console.log('Crawl4AI HTML 片段:', crawlData.html.substring(0, 1000));
+
+                const domParser = new DOMParser();
+                const doc = domParser.parseFromString(crawlData.html, 'text/html');
+                const selects = doc.querySelectorAll('select');
+                console.log('页面中共有', selects.length, '个 select');
+                selects.forEach((sel, idx) => {
+                    console.log(`select ${idx}: name=${sel.name || ''}, options数量=${sel.options ? sel.options.length : 0}`);
+                    if (sel.options) {
+                        for (const opt of sel.options) {
+                            console.log(`  - ${opt.text} (value=${opt.value})`);
+                        }
+                    }
+                });
+                const parser = new FormParser();
+                parser.document = doc;
+                formStructure = parser.getFormStructure();
+                fields = formStructure.fields;
+                console.log('解析出的字段示例：', fields[0] || null);
+                const achievementField = fields.find(f => (f.label || '').includes('成果类型') || (f.name || '').includes('成果类型'));
+                console.log('成果类型字段的 options：', achievementField ? achievementField.options : null);
+                if (this.aiSettings.enableAI) {
+                    const llmClient = new DeepSeekLLM(this.aiSettings.apiKey, this.aiSettings.model);
+                    const llmStructure = await parser.analyzeFormStructureViaLLM(llmClient);
+                    if (llmStructure && Array.isArray(llmStructure) && llmStructure.length > 0) {
+                        fields = fields.map(field => {
+                            const match = llmStructure.find(l =>
+                                (l.name && field.name && l.name === field.name) ||
+                                (l.label && field.label && l.label.includes(field.label))
+                            );
+                            if (match) {
+                                return { ...field, ...match };
+                            }
+                            return field;
+                        });
+                    }
+                }
+                this.formTabId = null;
+                if (typeof chrome !== 'undefined' && chrome.tabs) {
+                    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+                    if (tabs && tabs.length > 0) {
+                        this.formTabId = tabs[0].id;
+                        if (this.backToFormBtn) this.backToFormBtn.style.display = 'block';
+                    }
+                }
+            }
+
+            if (!fields || fields.length === 0) {
+                const crawlError = crawlData && crawlData.error ? `: ${crawlData.error}` : '';
+                this.setStatus(`Crawl4AI 解析失败${crawlError}`, 'error');
                 return;
             }
 
-            this.formTabId = response.tabId;
-            if (this.backToFormBtn) this.backToFormBtn.style.display = 'block';
-
-            this.setStatus('正在智能解析表单结构...', 'ai-thinking');
-            
-            const domParser = new DOMParser();
-            const doc = domParser.parseFromString(response.content, 'text/html');
-            const parser = new FormParser();
-            parser.document = doc; 
-            const llmClient = new DeepSeekLLM(this.aiSettings.apiKey, this.aiSettings.model);
-            
-            console.log("🤖 正在使用 LLM 分析表单结构...");
-            const llmStructure = await parser.analyzeFormStructureViaLLM(llmClient);
-            const formStructure = parser.getFormStructure();
-            
-            if (llmStructure && Array.isArray(llmStructure) && llmStructure.length > 0) {
-                console.log("✅ LLM 成功分析出表单结构，正在合并...", llmStructure);
-                formStructure.fields = formStructure.fields.map(field => {
-                    const match = llmStructure.find(l => 
-                        (l.name && field.name && l.name === field.name) || 
-                        (l.label && field.label && l.label.includes(field.label))
-                    );
-                    if (match) {
-                        return { 
-                            ...field, 
-                            category: match.category, 
-                            label: match.label, 
-                            type: match.type,
-                            format_hint: match.format_hint || field.format_hint
-                        };
-                    }
-                    return field;
-                });
+            if (!fields || fields.length === 0) {
+                this.setStatus('未找到可填写字段', 'warning');
+                return;
             }
 
-            this.currentFormFields = formStructure.fields;
+            this.currentFormFields = fields;
             
             // ========== 新增：初始化 requiredPaperFields ==========
-            this.requiredPaperFields = this.deriveRequiredPaperFields(this.currentFormFields);
+            this.requiredPaperFields = this.deriveRequiredPaperFields(fields);
             // ====================================================
             
-            this.renderFormFields(this.currentFormFields);
+            this.renderFormFields(fields);
             
-            const fieldCount = this.currentFormFields.length;
-            if (fieldCount > 0) {
-                this.resetToStartPage();
-                this.setStatus(`成功解析 ${fieldCount} 个字段，请选择论文`, 'success');
-                this.authorSearchArea.style.display = 'block';
-                this.fillingProgress.style.display = 'none';
-                this.fillingControls.style.display = 'none';
-                this.fillingStats.style.display = 'none';
-                this.updateStats();
-            } else {
-                this.setStatus('未找到可填写字段', 'warning');
+            const fieldCount = fields.length;
+            this.resetToStartPage();
+            this.setStatus(`成功解析 ${fieldCount} 个字段，请选择论文${useCrawl4AI ? '（Crawl4AI）' : ''}`, 'success');
+            this.authorSearchArea.style.display = 'block';
+            this.fillingProgress.style.display = 'none';
+            this.fillingControls.style.display = 'none';
+            this.fillingStats.style.display = 'none';
+            this.updateStats();
+
+        } catch (error) {
+            console.error('解析表单错误:', error);
+            this.setStatus('解析出错: ' + error.message, 'error');
+        }
+    }
+
+    async parseFormStructureFromHtml(html) {
+        const domParser = new DOMParser();
+        const doc = domParser.parseFromString(String(html || ''), 'text/html');
+        const parser = new FormParser();
+        parser.document = doc;
+        const llmClient = new DeepSeekLLM(this.aiSettings.apiKey, this.aiSettings.model);
+
+        console.log('🤖 正在使用 LLM 分析表单结构...');
+        const llmStructure = await parser.analyzeFormStructureViaLLM(llmClient);
+        const formStructure = parser.getFormStructure();
+
+        if (llmStructure && Array.isArray(llmStructure) && llmStructure.length > 0) {
+            console.log('✅ LLM 成功分析出表单结构，正在合并...', llmStructure);
+            formStructure.fields = formStructure.fields.map(field => {
+                const match = llmStructure.find(l =>
+                    (l.name && field.name && l.name === field.name) ||
+                    (l.label && field.label && l.label.includes(field.label))
+                );
+                if (!match) return field;
+                return {
+                    ...field,
+                    category: match.category,
+                    label: match.label,
+                    type: match.type,
+                    format_hint: match.format_hint || field.format_hint
+                };
+            });
+        }
+
+        return formStructure;
+    }
+
+    async parseCurrentForm() {
+        const url = this.formUrlInput.value.trim();
+        if (!url) {
+            this.setStatus('请输入表单URL', 'warning');
+            return;
+        }
+        this.currentFormUrl = url;
+        this.setStatus('正在获取页面内容...', 'searching');
+
+        try {
+            const crawlData = await fetchCrawl4AIPageContent(url);
+            if (!crawlData || !crawlData.html) {
+                const crawlError = crawlData && crawlData.error ? `: ${crawlData.error}` : '';
+                this.setStatus(`Crawl4AI 解析失败${crawlError}`, 'error');
+                return;
             }
 
+            console.log('✅ 使用 Crawl4AI 获取页面成功，长度:', crawlData.html.length);
+            console.log('Crawl4AI HTML 片段:', crawlData.html.substring(0, 1000));
+
+            const { schema, fields } = await extractFormFieldsFromHtml(crawlData.html);
+            console.log('schema-extractor forms:', schema?.forms || []);
+            console.log('解析出的字段示例：', fields[0] || null);
+            const achievementField = fields.find(f => (f.label || '').includes('成果类型') || (f.name || '').includes('成果类型'));
+            console.log('成果类型字段的 options：', achievementField ? achievementField.options : null);
+
+            if (!fields || fields.length === 0) {
+                this.setStatus('未找到可填写字段', 'warning');
+                return;
+            }
+
+            this.formTabId = null;
+            if (typeof chrome !== 'undefined' && chrome.tabs) {
+                const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+                if (tabs && tabs.length > 0) {
+                    this.formTabId = tabs[0].id;
+                    if (this.backToFormBtn) this.backToFormBtn.style.display = 'block';
+                }
+            }
+
+            this.currentFormFields = fields;
+            this.requiredPaperFields = this.deriveRequiredPaperFields(fields);
+            this.renderFormFields(fields);
+
+            const fieldCount = fields.length;
+            this.resetToStartPage();
+            this.setStatus(`成功解析 ${fieldCount} 个字段，请选择论文（schema-extractor）`, 'success');
+            this.authorSearchArea.style.display = 'block';
+            this.fillingProgress.style.display = 'none';
+            this.fillingControls.style.display = 'none';
+            this.fillingStats.style.display = 'none';
+            this.updateStats();
         } catch (error) {
             console.error('解析表单错误:', error);
             this.setStatus('解析出错: ' + error.message, 'error');
@@ -1723,14 +1836,8 @@ class FormFillingSidebar {
         }
 
         // 无论选择什么，都尝试回到原表单页面，确保用户能看到操作
-        if (this.formTabId) {
+        if (this.formTabId && typeof chrome !== 'undefined' && chrome.tabs) {
             try {
-                await this.sendMessageToBackground({
-                    action: 'getActiveTabInfo', // 借用这个消息来触发标签页聚焦，或者干脆加个新的
-                    data: { tabId: this.formTabId }
-                });
-                // 实际上我在 background.js 的 fillFormField 中已经加了聚焦
-                // 这里我们显式调用一次聚焦
                 chrome.tabs.update(this.formTabId, { active: true });
             } catch (e) {}
         }
@@ -1747,6 +1854,9 @@ class FormFillingSidebar {
     }
 
     handleAgentStep(stepInfo) {
+        if (stepInfo && typeof stepInfo.requestId === 'number' && stepInfo.requestId !== this.activeAIRequestId) {
+            return;
+        }
         console.log('收到智能体步骤:', stepInfo);
         
         // 如果没有开启显示思考过程，则只更新状态栏
@@ -1823,6 +1933,21 @@ class FormFillingSidebar {
     }
 
     displayCurrentFieldInfo(field, group = null) {
+        const getFieldTypeLabel = (type) => {
+            const typeMap = {
+                text: '文本',
+                textarea: '多行文本',
+                select: '下拉选择',
+                radio: '单选',
+                checkbox: '复选',
+                email: '邮箱',
+                url: '链接',
+                number: '数字',
+                date: '日期'
+            };
+            return typeMap[String(type || '').toLowerCase()] || (type || 'text');
+        };
+
         let groupHtml = '';
         if (group) {
             const relText = group.relationship === 'or' ? '(互斥/二选一)' : 
@@ -1835,7 +1960,7 @@ class FormFillingSidebar {
             ${groupHtml}
             <h4>正在处理: ${field.label || field.name}</h4>
             <div class="field-detail"><strong>字段名:</strong> ${field.name}</div>
-            <div class="field-detail"><strong>类型:</strong> ${field.type || 'text'}</div>
+            <div class="field-detail"><strong>类型:</strong> ${getFieldTypeLabel(field.type)}</div>
             <div class="field-detail"><strong>必填:</strong> ${field.required ? '是' : '否'}</div>
             <div id="fieldPredictionTip" class="field-detail" style="color: #38a169; display: none; margin-top: 5px; font-weight: bold;"></div>
         `;
@@ -1844,8 +1969,13 @@ class FormFillingSidebar {
     }
 
     async processFieldWithAI(field) {
+        const requestId = ++this.activeAIRequestId;
+        let timeoutId = null;
         try {
             this.showAIThinking();
+            if (this.formFillingAgent) {
+                this.formFillingAgent.currentRequestId = requestId;
+            }
             
             const currentGroup = this.fieldGroups[this.currentGroupIndex];
             
@@ -1860,10 +1990,23 @@ class FormFillingSidebar {
             
             const timeoutMs = 45000;
             const aiCall = this.formFillingAgent._aiFillField(field, formStructure, currentGroup, this.filledContext);
+            const timeoutPromise = new Promise((_, reject) => {
+                timeoutId = setTimeout(() => {
+                    if (this.activeAIRequestId !== requestId) return;
+                    if (this.formFillingAgent) {
+                        this.formFillingAgent.cancelCurrentTask();
+                    }
+                    reject(new Error(`AI_TIMEOUT:${timeoutMs}`));
+                }, timeoutMs);
+            });
             const aiResult = await Promise.race([
                 aiCall,
-                new Promise((_, reject) => setTimeout(() => reject(new Error(`AI处理超时(${timeoutMs}ms)`)), timeoutMs))
+                timeoutPromise
             ]);
+
+            if (this.activeAIRequestId !== requestId || this.activeField !== field) {
+                return;
+            }
             
             console.log('AI字段结果:', { fieldName: field?.name, fieldLabel: field?.label, groupName: currentGroup?.name, result: aiResult });
             
@@ -1873,8 +2016,6 @@ class FormFillingSidebar {
             if (aiResult && aiResult.type === 'cancelled') {
                 console.log('AI 任务已被用户取消，跳过当前字段');
                 this.hideAIThinking();
-                // 跳过当前字段（直接调用 skipCurrentField 会再次取消，但此时 agent 已经取消，可以安全调用）
-                this.skipCurrentField();
                 return;
             }
             // =====================================
@@ -1970,15 +2111,22 @@ class FormFillingSidebar {
             }
             
         } catch (error) {
+            if (this.activeAIRequestId !== requestId || this.activeField !== field) {
+                return;
+            }
             console.error('AI处理字段失败:', error);
             const msg = String(error?.message || '');
-            if (msg.includes('AI处理超时')) {
-                this.setStatus('AI 处理超时，请手动输入', 'warning');
+            if (msg.startsWith('AI_TIMEOUT:')) {
+                this.setStatus('AI 处理超时，已停止当前思考。可手动输入或点击跳过', 'warning');
             } else {
                 this.setStatus(`AI处理失败: ${error.message}`, 'error');
             }
             this.showManualInputInterface(field);
             this.hideAIThinking();
+        } finally {
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+            }
         }
     }
 
@@ -2009,8 +2157,7 @@ class FormFillingSidebar {
     }
 
     hideAIThinking() {
-        // 不改变状态，仅在需要时由调用方设置更准确的提示
-        // 保留思考内容展示，方便用户回顾
+        this.aiThinkingDisplay.style.display = 'none';
     }
 
     resetOptionsDisplay() {
@@ -2116,6 +2263,7 @@ class FormFillingSidebar {
                 data: {
                     fieldName: field.name,
                     value: value,
+                    fieldSelector: field.selector || '',
                     tabId: this.formTabId
                 }
             });
@@ -2288,6 +2436,7 @@ class FormFillingSidebar {
                     data: {
                         fieldName: item.field.name,
                         value: item.value,
+                        fieldSelector: item.field.selector || '',
                         tabId: this.formTabId
                     }
                 });
@@ -2403,6 +2552,7 @@ class FormFillingSidebar {
                 data: {
                     fieldName: field.name,
                     value: value,
+                    fieldSelector: field.selector || '',
                     tabId: this.formTabId
                 }
             });
@@ -2472,6 +2622,8 @@ class FormFillingSidebar {
     }
 
     skipCurrentField() {
+        this.activeAIRequestId++;
+
         // 如果正在运行 AI 任务，立即取消
         if (this.formFillingAgent) {
             this.formFillingAgent.cancelCurrentTask();
@@ -2480,12 +2632,17 @@ class FormFillingSidebar {
         const field = this.activeField;
         if (!field) return;
 
+        this.hideAIThinking();
+        this.resetOptionsDisplay();
+
         // 将字段标记为跳过
         this.filledFields[field.name] = {
             label: field.label || field.name,
             method: 'skip',
             timestamp: Date.now()
         };
+
+        this.setStatus(`已跳过字段: ${field.label || field.name}`, 'info');
 
         // 顺序移动到下一个字段
         this._moveToNextField();
@@ -3315,6 +3472,7 @@ class FormFillingSidebar {
                         data: {
                             fieldName: field.name,
                             value: value,
+                            fieldSelector: field.selector || '',
                             tabId: this.formTabId
                         }
                     });

@@ -13,7 +13,13 @@ class FormFillingAgent {
         this.llmClient = llmClient;
         this.toolExecutor = toolExecutor;
         this.onStep = onStep;
-        this.agent = new ReActAgent(llmClient, toolExecutor, 20, onStep);
+        this.currentRequestId = 0;
+        const initialRequestId = this.currentRequestId;
+        this.agent = new ReActAgent(llmClient, toolExecutor, 20, (stepInfo) => {
+            if (this.onStep) {
+                this.onStep({ ...stepInfo, requestId: initialRequestId });
+            }
+        });
         
         // 添加上下文记忆
         this.filledContext = {}; // 存储已填写的字段信息
@@ -67,11 +73,8 @@ class FormFillingAgent {
             }
             \`\`\`
         - 多选项使用 Options[选项1 | 选项2]，JSON 同理。
-        7. **处理选择类字段**：对于 select、radio、checkbox 类型字段，你必须先使用 GetPageElements 工具获取该字段的可用选项列表。调用时可以使用字段名、标签文本或 CSS 选择器。例如：
-        - 如果知道字段名：GetPageElements["select[name='成果类型']"]
-        - 如果知道标签文本：GetPageElements["成果类型"]  （工具会自动查找标签文本）
-        - 也可以使用 CSS 选择器：GetPageElements[".field-row .field-label:contains('成果类型') + select"]
-        8. **解析 GetPageElements 结果**：当你调用 GetPageElements 获取某个字段的可选项时，返回的结构如下：
+        7. **处理选择类字段**：对于 select、radio、checkbox 类型字段，优先使用题目中已经给出的选项列表直接选择。只有当题目明确说明“当前未解析到选项”时，才允许调用 GetPageElements 补充获取选项。
+        8. **解析 GetPageElements 结果**：当你确实需要调用 GetPageElements 获取某个字段的可选项时，返回的结构如下：
         {
             "success": true,
             "elements": [
@@ -84,7 +87,7 @@ class FormFillingAgent {
         }
         对于 select 字段，你应从 elements[0].options 中提取所有选项。然后，根据论文信息（如标题、会议、年份）判断哪个选项最匹配，输出 Finish[选项的 text 或 value]。如果匹配结果不唯一，可以使用 Options[选项1 | 选项2] 提供候选项。
         对于 radio/checkbox 字段，elements 中可能包含多个元素，每个元素有自己的 value 和 label，你也需要从中选择匹配项。
-        9. **处理工具返回空结果**：如果 GetPageElements 返回的 elements 为空（即找不到该字段），请按以下步骤降级：
+        9. **处理工具返回空结果**：只有在未提供选项且你主动调用了 GetPageElements 时，若返回的 elements 为空（即找不到该字段），请按以下步骤降级：
         - 第一步：尝试使用更通用的选择器，如 GetPageElements["select"] 获取页面上所有下拉框。返回的每个元素都有 options 属性。
         - 第二步：遍历这些下拉框的 options，根据上下文（如论文类型、会议信息）选择最匹配的选项。如果多个下拉框都有相关选项，可以使用 Options 提供候选项。
         - 第三步：如果还是无法获取，再基于上下文直接推断最可能的选项，并用 Finish[答案] 输出。
@@ -855,6 +858,46 @@ ${JSON.stringify(fieldInfo, null, 2)}
         }
     }
 
+    _createScopedToolExecutor(field) {
+        const hasResolvedOptions = Array.isArray(field?.options) && field.options.length > 0;
+        if (!hasResolvedOptions) {
+            return this.toolExecutor;
+        }
+
+        const baseExecutor = this.toolExecutor;
+        const filteredTools = { ...(baseExecutor.tools || {}) };
+        delete filteredTools.GetPageElements;
+
+        return {
+            ...baseExecutor,
+            tools: filteredTools,
+            getTool(name) {
+                return filteredTools[name] ? filteredTools[name].func : null;
+            },
+            getAvailableTools() {
+                return Object.keys(filteredTools).join(', ');
+            },
+            getToolsDescription() {
+                let desc = '';
+                for (const [name, tool] of Object.entries(filteredTools)) {
+                    desc += `### ${name}\n`;
+                    desc += `描述: ${tool.description}\n`;
+                    if (tool.schema && tool.schema.parameters) {
+                        desc += `输入参数:\n`;
+                        const props = tool.schema.parameters.properties || {};
+                        const required = tool.schema.parameters.required || [];
+                        for (const [pName, pDef] of Object.entries(props)) {
+                            const reqMark = required.includes(pName) ? '(必需)' : '(可选)';
+                            desc += `- ${pName} ${reqMark}: ${pDef.type || 'any'} - ${pDef.description || ''}\n`;
+                        }
+                    }
+                    desc += '\n';
+                }
+                return desc;
+            }
+        };
+    }
+
     async _aiFillField(field, formStructure, group, context = null) {
         // 1. 检查缓存
         const cached = this._getCachedAnswer(field);
@@ -869,6 +912,18 @@ ${JSON.stringify(fieldInfo, null, 2)}
         const fieldDesc = field.description || '无';
         const filledText = this._formatAllContext(context);
         const groupFields = group.fields.map(f => f.label || f.name).join(', ');
+        const options = Array.isArray(field.options) ? field.options : [];
+        const scopedToolExecutor = this._createScopedToolExecutor(field);
+
+        let optionsText = '当前没有预解析到选项。';
+        let selectionRuleText = '如果这是选择字段且当前没有选项，可按需调用 GetPageElements 获取。';
+        if (options.length > 0) {
+            optionsText = options
+                .slice(0, 20)
+                .map((opt, index) => `${index + 1}. ${opt.text || opt.value || ''} (值: ${opt.value || opt.text || ''})`)
+                .join('\n');
+            selectionRuleText = '这是选择字段，选项已经完整提供。禁止调用 GetPageElements，必须直接从上述选项中选择。';
+        }
 
         const question = `
     你是智能填表助手。当前需要填写字段：
@@ -882,8 +937,14 @@ ${JSON.stringify(fieldInfo, null, 2)}
 
     同组其他字段（可能一起填写）：${groupFields}
 
+    当前字段可选项：
+    ${optionsText}
+
+    选择规则：
+    ${selectionRuleText}
+
     可用工具如下：
-    ${this.toolExecutor.getToolsDescription()}
+    ${scopedToolExecutor.getToolsDescription()}
 
     请根据上下文，自主决定是否调用工具获取信息。你可以多次调用工具，最终输出该字段的值。
     输出格式：
@@ -892,7 +953,11 @@ ${JSON.stringify(fieldInfo, null, 2)}
     `;
 
         // 3. 使用 ReActAgent 执行
-        const tempAgent = new ReActAgent(this.llmClient, this.toolExecutor, 10, this.onStep);
+        const requestId = this.currentRequestId;
+        const stepCallback = this.onStep
+            ? (stepInfo) => this.onStep({ ...stepInfo, requestId })
+            : null;
+        const tempAgent = new ReActAgent(this.llmClient, scopedToolExecutor, 10, stepCallback);
         this.agent = tempAgent;
         const result = await tempAgent.run(question);
         this.agent = null; 
@@ -1100,7 +1165,8 @@ Options[选项1 | 选项2]
         // 对于选择框
         const options = field.options || [];
         if (options.length > 0) {
-            prompt += "\n⚠️ 这是一个选择题字段，你必须严格从以下选项中选择，不要自行编造任何新选项。只能使用下列选项之一：\n";
+            prompt += "\n⚠️ 这是一个选择题字段。**重要**：以下选项已经完整，请直接从中选择，不要再调用 GetPageElements 工具。\n";
+            prompt += "只能使用下列选项之一：\n";
             for (let i = 0; i < Math.min(options.length, 10); i++) {
                 const opt = options[i];
                 const optText = opt.text || opt.value || '';
@@ -1115,7 +1181,11 @@ Options[选项1 | 选项2]
         }
 
         if (field.type === 'select' || field.type === 'radio' || field.type === 'checkbox') {
-            prompt += `\n⚠️ 这是一个选择题字段。在调用工具时，优先使用 GetPageElements["[name='${field.name}']"] 或 GetPageElements["select[name='${field.name}']"] 获取该字段的所有选项。然后从选项中选择最匹配的一项。不要自己编造选项。`;
+            if (options.length === 0) {
+                prompt += `\n⚠️ 这是一个选择题字段，但当前未解析到选项。在调用工具时，优先使用 GetPageElements["[name='${field.name}']"] 或 GetPageElements["select[name='${field.name}']"] 获取该字段的所有选项。然后从选项中选择最匹配的一项。不要自己编造选项。`;
+            } else {
+                prompt += `\n⚠️ 请直接从上述选项中选择，不要再调用 GetPageElements 工具。`;
+            }
         }
 
         // 格式提示（由LLM在解析时生成）

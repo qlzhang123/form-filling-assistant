@@ -85,16 +85,9 @@ class FormFillingBackground {
         console.log('背景脚本收到消息:', action, '来自:', sender.tab ? sender.tab.id : 'popup/sidepanel');
         
         switch (action) {
-            case 'parseForm':
-                this.handleParseForm(sender, data, sendResponse);
-                return true;
-                
             case 'fillFormField':
                 this.handleFillFormField(sender, data, sendResponse);
                 return true;
-                   
-            case 'getActiveTabInfo':
-                return this.handleGetActiveTabInfo(sender, data, sendResponse);
                 
             default:
                 console.warn('未知的消息动作:', action);
@@ -128,53 +121,6 @@ class FormFillingBackground {
             console.error(`无法注入内容脚本到标签页 ${tabId}:`, error);
             return false;
         }
-    }
-
-    async handleParseForm(sender, data, sendResponse) {
-        /**
-         * 处理表单解析请求
-         * 
-         * 注意：现在的解析逻辑已迁移到 Sidebar (FormParser + LLM)，
-         * background 仅负责获取 DOM 字符串传回 Sidebar。
-         */
-        let tabId = sender.tab?.id;
-        
-        if (!tabId) {
-            try {
-                const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-                if (tabs && tabs.length > 0) {
-                    tabId = tabs[0].id;
-                }
-            } catch (error) {
-                console.error('获取活跃标签页失败:', error);
-            }
-        }
-
-        if (!tabId) {
-            sendResponse({ success: false, message: '无法获取标签页ID' });
-            return;
-        }
-
-        // 确保内容脚本已加载
-        await this.ensureContentScript(tabId);
-        
-        // 不再让 Content Script 解析，而是请求它返回页面 HTML
-        // Sidebar 将使用 FormParser 和 LLM 进行深度解析
-        chrome.tabs.sendMessage(tabId, { action: 'getPageContent' }, (response) => {
-            if (chrome.runtime.lastError) {
-                console.error('发送消息失败:', chrome.runtime.lastError);
-                sendResponse({ 
-                    success: false, 
-                    message: `与内容脚本通信失败: ${chrome.runtime.lastError.message}` 
-                });
-            } else {
-                const finalResponse = response || { success: false, message: '内容脚本未响应' };
-                if (finalResponse.success) {
-                    finalResponse.tabId = tabId;
-                }
-                sendResponse(finalResponse);
-            }
-        });
     }
 
     async handleFillFormField(sender, data, sendResponse) {
@@ -212,7 +158,7 @@ class FormFillingBackground {
         // 转发给内容脚本
         chrome.tabs.sendMessage(tabId, { 
             action: 'fillFormField', 
-            data: { fieldName: data.fieldName, value: data.value } 
+            data: { fieldName: data.fieldName, value: data.value, fieldSelector: data.fieldSelector || '' } 
         }, (response) => {
             if (chrome.runtime.lastError) {
                 console.error('发送消息失败:', chrome.runtime.lastError);
@@ -229,33 +175,6 @@ class FormFillingBackground {
     
     
 
-    handleGetActiveTabInfo(sender, data, sendResponse) {
-        /**
-         * 获取活跃标签页信息
-         */
-        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-            if (chrome.runtime.lastError) {
-                sendResponse({ 
-                    success: false, 
-                    message: `获取标签页信息失败: ${chrome.runtime.lastError.message}` 
-                });
-            } else if (tabs.length > 0) {
-                sendResponse({
-                    success: true,
-                    tab: tabs[0]
-                });
-            } else {
-                sendResponse({
-                    success: false,
-                    message: '未找到活跃标签页'
-                });
-            }
-        });
-        
-        return true;
-    }
-
-    
 }
 
 // 初始化背景脚本

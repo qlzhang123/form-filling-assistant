@@ -35,7 +35,7 @@ class FormFillingContentScript {
         
         switch (action) {
             case 'fillFormField':
-                this.fillFormField(data.fieldName, data.value, sendResponse);
+                this.fillFormField(data.fieldName, data.value, sendResponse, data.fieldSelector);
                 break;
                 
             case 'getPageElements':
@@ -163,7 +163,7 @@ class FormFillingContentScript {
         return null;
     }
 
-    async fillFormField(fieldName, value, sendResponse) {
+    async fillFormField(fieldName, value, sendResponse, fieldSelector = '') {
         /**
          * 填写表单字段
          */
@@ -444,6 +444,21 @@ class FormFillingContentScript {
                 return { ok: true, chosenText: chosen.text, chosenValue: chosen.value };
             };
 
+            let allMatchedElements = [];
+
+            if (fieldSelector) {
+                try {
+                    const directMatches = Array.from(document.querySelectorAll(fieldSelector));
+                    directMatches.forEach(el => {
+                        if (el.matches && el.matches('input, select, textarea')) {
+                            allMatchedElements.push(el);
+                        } else {
+                            allMatchedElements.push(...Array.from(el.querySelectorAll('input, select, textarea')));
+                        }
+                    });
+                } catch (e) {}
+            }
+
             // 查找所有可能的匹配元素
             const selectors = [
                 `[name="${fieldName}"]`,
@@ -455,7 +470,6 @@ class FormFillingContentScript {
                 `[placeholder="${fieldName}"]`
             ];
 
-            let allMatchedElements = [];
             selectors.forEach(selector => {
                 try {
                     const found = Array.from(document.querySelectorAll(selector));
