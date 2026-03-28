@@ -1,11 +1,10 @@
-/**
+﻿/**
  * 智能填表助手侧边栏主控制器
  */
 
 import { DeepSeekLLM } from './js/llm_client.js';
 import { FormFillingAgent } from './js/form_agent.js';
 import { EnhancedToolExecutor } from './js/tool_executor.js';
-import { FormParser } from './js/form_parser.js';
 import { fetchCrawl4AIPageContent } from './js/crawl4ai_client.js';
 import { extractFormFieldsFromHtml } from './js/schema_extractor_adapter.js';
 import { unifiedSearchAuthors, unifiedGetPublications, getPaperByDOI,  unifiedSearchPapers, searchConferenceEventDate } from './js/api_client.js';
@@ -570,136 +569,6 @@ class FormFillingSidebar {
         }
     }
 
-    async parseCurrentForm() {
-        const url = this.formUrlInput.value.trim();
-        if (!url) {
-            this.setStatus('请输入表单URL', 'warning');
-            return;
-        }
-        this.currentFormUrl = url;
-        this.setStatus('正在获取页面内容...', 'searching');
-        
-        try {
-            let fields = null;
-            let formStructure = null;
-            let useCrawl4AI = false;
-
-            const crawlData = await fetchCrawl4AIPageContent(url);
-            if (crawlData && crawlData.html) {
-                console.log('✅ 使用 Crawl4AI 获取页面成功，长度:', crawlData.html.length);
-                useCrawl4AI = true;
-                console.log('Crawl4AI HTML 片段:', crawlData.html.substring(0, 1000));
-
-                const domParser = new DOMParser();
-                const doc = domParser.parseFromString(crawlData.html, 'text/html');
-                const selects = doc.querySelectorAll('select');
-                console.log('页面中共有', selects.length, '个 select');
-                selects.forEach((sel, idx) => {
-                    console.log(`select ${idx}: name=${sel.name || ''}, options数量=${sel.options ? sel.options.length : 0}`);
-                    if (sel.options) {
-                        for (const opt of sel.options) {
-                            console.log(`  - ${opt.text} (value=${opt.value})`);
-                        }
-                    }
-                });
-                const parser = new FormParser();
-                parser.document = doc;
-                formStructure = parser.getFormStructure();
-                fields = formStructure.fields;
-                console.log('解析出的字段示例：', fields[0] || null);
-                const achievementField = fields.find(f => (f.label || '').includes('成果类型') || (f.name || '').includes('成果类型'));
-                console.log('成果类型字段的 options：', achievementField ? achievementField.options : null);
-                if (this.aiSettings.enableAI) {
-                    const llmClient = new DeepSeekLLM(this.aiSettings.apiKey, this.aiSettings.model);
-                    const llmStructure = await parser.analyzeFormStructureViaLLM(llmClient);
-                    if (llmStructure && Array.isArray(llmStructure) && llmStructure.length > 0) {
-                        fields = fields.map(field => {
-                            const match = llmStructure.find(l =>
-                                (l.name && field.name && l.name === field.name) ||
-                                (l.label && field.label && l.label.includes(field.label))
-                            );
-                            if (match) {
-                                return { ...field, ...match };
-                            }
-                            return field;
-                        });
-                    }
-                }
-                this.formTabId = null;
-                if (typeof chrome !== 'undefined' && chrome.tabs) {
-                    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-                    if (tabs && tabs.length > 0) {
-                        this.formTabId = tabs[0].id;
-                        if (this.backToFormBtn) this.backToFormBtn.style.display = 'block';
-                    }
-                }
-            }
-
-            if (!fields || fields.length === 0) {
-                const crawlError = crawlData && crawlData.error ? `: ${crawlData.error}` : '';
-                this.setStatus(`Crawl4AI 解析失败${crawlError}`, 'error');
-                return;
-            }
-
-            if (!fields || fields.length === 0) {
-                this.setStatus('未找到可填写字段', 'warning');
-                return;
-            }
-
-            this.currentFormFields = fields;
-            
-            // ========== 新增：初始化 requiredPaperFields ==========
-            this.requiredPaperFields = this.deriveRequiredPaperFields(fields);
-            // ====================================================
-            
-            this.renderFormFields(fields);
-            
-            const fieldCount = fields.length;
-            this.resetToStartPage();
-            this.setStatus(`成功解析 ${fieldCount} 个字段，请选择论文${useCrawl4AI ? '（Crawl4AI）' : ''}`, 'success');
-            this.authorSearchArea.style.display = 'block';
-            this.fillingProgress.style.display = 'none';
-            this.fillingControls.style.display = 'none';
-            this.fillingStats.style.display = 'none';
-            this.updateStats();
-
-        } catch (error) {
-            console.error('解析表单错误:', error);
-            this.setStatus('解析出错: ' + error.message, 'error');
-        }
-    }
-
-    async parseFormStructureFromHtml(html) {
-        const domParser = new DOMParser();
-        const doc = domParser.parseFromString(String(html || ''), 'text/html');
-        const parser = new FormParser();
-        parser.document = doc;
-        const llmClient = new DeepSeekLLM(this.aiSettings.apiKey, this.aiSettings.model);
-
-        console.log('🤖 正在使用 LLM 分析表单结构...');
-        const llmStructure = await parser.analyzeFormStructureViaLLM(llmClient);
-        const formStructure = parser.getFormStructure();
-
-        if (llmStructure && Array.isArray(llmStructure) && llmStructure.length > 0) {
-            console.log('✅ LLM 成功分析出表单结构，正在合并...', llmStructure);
-            formStructure.fields = formStructure.fields.map(field => {
-                const match = llmStructure.find(l =>
-                    (l.name && field.name && l.name === field.name) ||
-                    (l.label && field.label && l.label.includes(field.label))
-                );
-                if (!match) return field;
-                return {
-                    ...field,
-                    category: match.category,
-                    label: match.label,
-                    type: match.type,
-                    format_hint: match.format_hint || field.format_hint
-                };
-            });
-        }
-
-        return formStructure;
-    }
 
     async parseCurrentForm() {
         const url = this.formUrlInput.value.trim();

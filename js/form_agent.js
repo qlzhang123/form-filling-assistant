@@ -3,7 +3,6 @@
  */
 
 import { ReActAgent } from './react_agent.js';
-import { FormParser } from './form_parser.js';
 
 class FormFillingAgent {
     /**
