@@ -38,6 +38,7 @@ class FormFillingSidebar {
         this.currentBatchPattern = null; // 当前正在处理的批量模式
         this.batchExecutionCancelled = false;
         this.activeAIRequestId = 0;
+        this.ignoredAIRequestIds = new Set();
         
         // 作者搜索相关状态
         this.currentAuthor = '';
@@ -1854,6 +1855,9 @@ class FormFillingSidebar {
     }
 
     handleAgentStep(stepInfo) {
+        if (stepInfo && typeof stepInfo.requestId === 'number' && this.ignoredAIRequestIds.has(stepInfo.requestId)) {
+            return;
+        }
         if (stepInfo && typeof stepInfo.requestId === 'number' && stepInfo.requestId !== this.activeAIRequestId) {
             return;
         }
@@ -1993,6 +1997,7 @@ class FormFillingSidebar {
             const timeoutPromise = new Promise((_, reject) => {
                 timeoutId = setTimeout(() => {
                     if (this.activeAIRequestId !== requestId) return;
+                    this.ignoredAIRequestIds.add(requestId);
                     if (this.formFillingAgent) {
                         this.formFillingAgent.cancelCurrentTask();
                     }
@@ -2622,6 +2627,7 @@ class FormFillingSidebar {
     }
 
     skipCurrentField() {
+        this.ignoredAIRequestIds.add(this.activeAIRequestId);
         this.activeAIRequestId++;
 
         // 如果正在运行 AI 任务，立即取消
@@ -2666,6 +2672,7 @@ class FormFillingSidebar {
     }
 
     quitFilling() {
+        this.ignoredAIRequestIds.add(this.activeAIRequestId);
         // 取消正在运行的 AI 任务
         if (this.formFillingAgent) {
             this.formFillingAgent.cancelCurrentTask();
@@ -2757,6 +2764,7 @@ class FormFillingSidebar {
     }
 
     stopFillingProcess() {
+        this.ignoredAIRequestIds.add(this.activeAIRequestId);
         // 取消正在运行的 AI 任务
         if (this.formFillingAgent) {
             this.formFillingAgent.cancelCurrentTask();
