@@ -445,6 +445,7 @@ class FormFillingContentScript {
             };
 
             let allMatchedElements = [];
+            let hasScopedSelectorMatches = false;
 
             if (fieldSelector) {
                 try {
@@ -456,38 +457,41 @@ class FormFillingContentScript {
                             allMatchedElements.push(...Array.from(el.querySelectorAll('input, select, textarea')));
                         }
                     });
+                    hasScopedSelectorMatches = allMatchedElements.length > 0;
                 } catch (e) {}
             }
 
-            // 查找所有可能的匹配元素
-            const selectors = [
-                `[name="${fieldName}"]`,
-                `#${fieldName}`,
-                `input[name="${fieldName}"]`,
-                `select[name="${fieldName}"]`,
-                `textarea[name="${fieldName}"]`,
-                `[aria-label="${fieldName}"]`,
-                `[placeholder="${fieldName}"]`
-            ];
+            if (!hasScopedSelectorMatches) {
+                // 查找所有可能的匹配元素
+                const selectors = [
+                    `[name="${fieldName}"]`,
+                    `#${fieldName}`,
+                    `input[name="${fieldName}"]`,
+                    `select[name="${fieldName}"]`,
+                    `textarea[name="${fieldName}"]`,
+                    `[aria-label="${fieldName}"]`,
+                    `[placeholder="${fieldName}"]`
+                ];
 
-            selectors.forEach(selector => {
-                try {
-                    const found = Array.from(document.querySelectorAll(selector));
-                    allMatchedElements = allMatchedElements.concat(found);
-                } catch (e) {}
-            });
+                selectors.forEach(selector => {
+                    try {
+                        const found = Array.from(document.querySelectorAll(selector));
+                        allMatchedElements = allMatchedElements.concat(found);
+                    } catch (e) {}
+                });
+            }
 
             // 去重并只保留可见元素
             let uniqueElements = [...new Set(allMatchedElements)].filter(el => this.isElementVisible(el));
 
-            if (uniqueElements.length === 0) {
+            if (uniqueElements.length === 0 && !hasScopedSelectorMatches) {
                 const byRow = findFieldRowElements(fieldName);
                 if (byRow.length) {
                     uniqueElements = byRow;
                 }
             }
 
-            if (uniqueElements.length === 0) {
+            if (uniqueElements.length === 0 && !hasScopedSelectorMatches) {
                 // 如果没有找到精确匹配，尝试通过标签文本模糊查找
                 const allInputs = Array.from(document.querySelectorAll('input, select, textarea'));
                 for (const input of allInputs) {
@@ -504,7 +508,7 @@ class FormFillingContentScript {
                 }
             }
 
-            if (uniqueElements.length === 0) {
+            if (uniqueElements.length === 0 && !hasScopedSelectorMatches) {
                 const target = normalize(fieldName);
                 const candidates = Array.from(document.querySelectorAll('select, input:not([type="hidden"]), textarea'))
                     .filter(el => this.isElementVisible(el));
@@ -582,18 +586,18 @@ class FormFillingContentScript {
                     }
                 }
 
-                let groupFields = [];
-                if (groupRow) {
+                let groupFields = uniqueElements.filter(el => el.type === type);
+                if (!groupFields.length && groupRow) {
                     groupFields = Array.from(groupRow.querySelectorAll(`input[type="${type}"]`)).filter(el => this.isElementVisible(el));
                 }
-                // 如果没找到行，退回到按 name 分组
                 if (!groupFields.length) {
                     const groupName = targetField.name;
                     if (groupName) {
                         groupFields = Array.from(document.querySelectorAll(`input[name="${groupName}"]`)).filter(el => this.isElementVisible(el));
-                    } else {
-                        groupFields = uniqueElements.filter(el => el.type === type);
                     }
+                }
+                if (!groupFields.length) {
+                    groupFields = uniqueElements.filter(el => el.type === type);
                 }
 
                 const candidates = getCandidates(value);
