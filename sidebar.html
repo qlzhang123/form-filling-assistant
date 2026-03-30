@@ -29,6 +29,11 @@
                         <small style="color: #718096; font-size: 11px;">密钥仅保存在本地，不会上传到服务器</small>
                     </div>
                     <div class="form-group">
+                        <label for="wosApiKey">WoS API密钥：</label>
+                        <input type="password" id="wosApiKey" placeholder="输入 Web of Science Expanded API 密钥">
+                        <small style="color: #718096; font-size: 11px;">仅在选定论文后请求一次 WoS 详情，并缓存结果以节省配额</small>
+                    </div>
+                    <div class="form-group">
                         <label for="aiModel">AI模型：</label>
                         <select id="aiModel">
                             <option value="deepseek-chat">deepseek-chat</option>

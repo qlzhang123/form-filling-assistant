@@ -8,12 +8,13 @@ import { EnhancedToolExecutor } from './js/tool_executor.js';
 import { fetchCrawl4AIPageContent } from './js/crawl4ai_client.js';
 import { extractFormFieldsFromHtml } from './js/schema_extractor_adapter.js';
 import { unifiedSearchAuthors, unifiedGetPublications, getPaperByDOI,  unifiedSearchPapers, searchConferenceEventDate } from './js/api_client.js';
-import { getSemanticScholarPaperByDoi, getCrossrefPaperByDoi, getOpenAlexPaperByDoi } from './js/api_client.js';
+import { getSemanticScholarPaperByDoi, getCrossrefPaperByDoi, getOpenAlexPaperByDoi, getWosPaperByDoi } from './js/api_client.js';
 class FormFillingSidebar {
     constructor() {
         this.fillHistory = [];
         this.aiSettings = {
             apiKey: '',
+            wosApiKey: '',
             model: 'deepseek-chat',
             temperature: 0.7,
             enableAI: true,
@@ -207,6 +208,7 @@ class FormFillingSidebar {
         // AI设置元素
         this.aiSettingsPanel = document.getElementById('aiSettings');
         this.apiKeyInput = document.getElementById('apiKey');
+        this.wosApiKeyInput = document.getElementById('wosApiKey');
         this.aiModelSelect = document.getElementById('aiModel');
         this.temperatureSlider = document.getElementById('temperature');
         this.tempValueDisplay = document.getElementById('tempValue');
@@ -458,6 +460,7 @@ class FormFillingSidebar {
                 const result = await chrome.storage.local.get(['aiSettings']);
                 if (result.aiSettings) {
                     this.aiSettings = { ...this.aiSettings, ...result.aiSettings };
+                    localStorage.setItem('aiSettings', JSON.stringify(this.aiSettings));
                     this.applyAISettingsToUI();
                 }
             } else {
@@ -477,6 +480,7 @@ class FormFillingSidebar {
         if (!this.apiKeyInput) return;
         
         this.apiKeyInput.value = this.aiSettings.apiKey || '';
+        if (this.wosApiKeyInput) this.wosApiKeyInput.value = this.aiSettings.wosApiKey || '';
         this.aiModelSelect.value = this.aiSettings.model || 'deepseek-chat';
         this.temperatureSlider.value = this.aiSettings.temperature || 0.7;
         this.tempValueDisplay.textContent = this.aiSettings.temperature || 0.7;
@@ -488,6 +492,7 @@ class FormFillingSidebar {
         try {
             this.aiSettings = {
                 apiKey: this.apiKeyInput.value.trim(),
+                wosApiKey: this.wosApiKeyInput ? this.wosApiKeyInput.value.trim() : '',
                 model: this.aiModelSelect.value,
                 temperature: parseFloat(this.temperatureSlider.value),
                 enableAI: this.enableAICheckbox.checked,
@@ -496,9 +501,8 @@ class FormFillingSidebar {
             
             if (typeof chrome !== 'undefined' && chrome.storage) {
                 await chrome.storage.local.set({ aiSettings: this.aiSettings });
-            } else {
-                localStorage.setItem('aiSettings', JSON.stringify(this.aiSettings));
             }
+            localStorage.setItem('aiSettings', JSON.stringify(this.aiSettings));
             
             this.setStatus('AI设置已保存', 'success');
             
@@ -1226,139 +1230,28 @@ class FormFillingSidebar {
         await this.fetchAndRenderPapers(this.searchFilters);
     }
 
-    async selectPaper(paper) {
-        console.log('用户选择了论文:', paper);
-        this.selectedPaper = { ...(paper || {}) };
-        window.__tempAuthors = (this.selectedPaper.authors || []).map((name, index) => {
-            let affiliation = '';
-            if (this.selectedPaper.authorAffiliations && this.selectedPaper.authorAffiliations[index]) {
-                affiliation = this.selectedPaper.authorAffiliations[index];
-            }
-            return { name, affiliation };
-        });
-        console.log('✅ 已保存作者列表到 window.__tempAuthors:', window.__tempAuthors);
-        this.setStatus(`已选择: ${paper.title}，正在补充元数据...`, 'searching');
-        
-        const doi = this.selectedPaper.doi;
-        if (doi) {
-            const merged = { ...(this.selectedPaper || {}) };
-            try {
-                // 基础字段（总是需要的）
-                const baseFields = ['title', 'authors', 'year', 'venue', 'doi', 'url'];
-                
-                // 根据表单需求动态决定是否需要额外字段
-                const needAbstract = this.requiredPaperFields.includes('abstract');
-                const needKeywords = this.requiredPaperFields.includes('keywords');
-                const needCitation = this.requiredPaperFields.includes('citationCount');
-                const needGrants = this.requiredPaperFields.includes('grants');
-                
-                // 构建各个API的 select/fields 参数
-                let selectOpenAlex = [...baseFields];
-                if (needAbstract) selectOpenAlex.push('abstract_inverted_index');
-                if (needKeywords) selectOpenAlex.push('keywords');
-                if (needCitation) selectOpenAlex.push('cited_by_count');
-                if (needGrants) selectOpenAlex.push('grants');
-                
-                let selectCrossref = [...baseFields];
-                if (needAbstract) selectCrossref.push('abstract');
-                if (needKeywords) selectCrossref.push('subject');
-                // 注意：CrossRef 本身不提供 citationCount，但我们保留占位，实际从其他API获取
-                if (needCitation) selectCrossref.push('citationCount'); // 可能无效，但保留
-                
-                let selectS2 = [...baseFields];
-                if (needAbstract) selectS2.push('abstract');
-                if (needKeywords) selectS2.push('fieldsOfStudy');
-                if (needCitation) selectS2.push('citationCount');
-                
-                // 并行调用API，只请求必要字段
-                const [s2Result, crossrefResult, openalexResult] = await Promise.allSettled([
-                    getSemanticScholarPaperByDoi(doi, selectS2.join(',')),
-                    getCrossrefPaperByDoi(doi, selectCrossref.join(',')),
-                    getOpenAlexPaperByDoi(doi, selectOpenAlex.join(','))
-                ]);
-                
-                // 处理 Crossref 结果
-                if (crossrefResult.status === 'fulfilled') {
-                    const crossref = crossrefResult.value;
-                    merged.conferenceName = crossref.conferenceName || merged.conferenceName;
-                    merged.conferenceLocation = crossref.conferenceLocation || merged.conferenceLocation;
-                    merged.articleNumber = crossref.articleNumber || merged.articleNumber;
-                    merged.firstPage = crossref.firstPage || merged.firstPage;
-                    merged.lastPage = crossref.lastPage || merged.lastPage;
-                    merged.pageRange = crossref.pageRange || merged.pageRange;
-                    merged.publicationDate = crossref.publicationDate || merged.publicationDate;
-                    merged.publicationMonth = crossref.publicationMonth || merged.publicationMonth;
-                    merged.publicationDay = crossref.publicationDay || merged.publicationDay;
-                    merged.conferenceEventDate = crossref.conferenceEventDate || merged.conferenceEventDate;
-                    merged.conferenceStartDate = crossref.conferenceStartDate || merged.conferenceStartDate;
-                    merged.conferenceEndDate = crossref.conferenceEndDate || merged.conferenceEndDate;
-                    merged.language = crossref.language || merged.language;
-                    if (crossref.keywords) {
-                        merged.keywords = [...new Set([...(merged.keywords || []), ...crossref.keywords])];
-                    }
-                    if (needAbstract && crossref.abstract) {
-                        merged.abstract = crossref.abstract;
-                    }
-                }
-                
-                // 处理 OpenAlex 结果
-                if (openalexResult.status === 'fulfilled') {
-                    const openalex = openalexResult.value;
-                    if (needCitation && merged.citationCount == null && openalex.citationCount != null) {
-                        merged.citationCount = openalex.citationCount;
-                    }
-                    if (needAbstract && !merged.abstract && openalex.abstract) {
-                        merged.abstract = openalex.abstract;
-                    }
-                    if (needGrants && openalex.grants) {
-                        merged.grants = openalex.grants;
-                    }
-                    merged.articleNumber = merged.articleNumber || openalex.articleNumber;
-                    merged.firstPage = merged.firstPage || openalex.firstPage;
-                    merged.lastPage = merged.lastPage || openalex.lastPage;
-                    merged.pageRange = merged.pageRange || openalex.pageRange;
-                    merged.publicationDate = merged.publicationDate || openalex.publicationDate;
-                    merged.publicationMonth = merged.publicationMonth || openalex.publicationMonth;
-                    merged.publicationDay = merged.publicationDay || openalex.publicationDay;
-                    merged.language = merged.language || openalex.language;
-                    if (openalex.keywords) {
-                        merged.keywords = [...new Set([...(merged.keywords || []), ...openalex.keywords])];
-                    }
-                }
-                
-                // 处理 Semantic Scholar 结果
-                if (s2Result.status === 'fulfilled') {
-                    const s2 = s2Result.value;
-                    if (needCitation && merged.citationCount == null && s2.citationCount != null) {
-                        merged.citationCount = s2.citationCount;
-                    }
-                    if (needAbstract && !merged.abstract && s2.abstract) {
-                        merged.abstract = s2.abstract;
-                    }
-                    merged.openAccessPdf = merged.openAccessPdf || s2.openAccessPdf;
-                    merged.publicationDate = merged.publicationDate || s2.publicationDate;
-                    if (s2.keywords) {
-                        merged.keywords = [...new Set([...(merged.keywords || []), ...s2.keywords])];
-                    }
-                }
-                
-                // 更新 this.selectedPaper
-                this.selectedPaper = merged;
-            } catch (e) {
-                console.warn('补充论文元数据失败:', e);
-                // 如果失败，保留原始选中的论文
-            }
-        }
+    formatFundingInfo(value) {
+        if (!value) return '';
+        if (typeof value === 'string') return value;
+        if (!Array.isArray(value)) return JSON.stringify(value);
+        const formatted = value.map(item => {
+            if (!item) return '';
+            if (typeof item === 'string') return item.trim();
+            if (typeof item !== 'object') return String(item).trim();
+            const parts = [
+                item.funder,
+                item.agency,
+                item.awardId,
+                item.award_id,
+                item.grantId,
+                item.grant_id
+            ].filter(Boolean).map(v => String(v).trim());
+            return parts.join(' / ');
+        }).filter(Boolean);
+        return formatted.join('; ');
+    }
 
-        const venueBase = this.selectedPaper.venue || this.selectedPaper.conferenceName || '';
-        const { formatted, shortName, rating } = this.formatVenueWithYearAndCCF(venueBase, this.selectedPaper.year);
-        this.selectedPaper.venueRaw = venueBase;
-        this.selectedPaper.venueFormatted = formatted || venueBase;
-        this.selectedPaper.venueShort = shortName || '';
-        this.selectedPaper.ccfRating = rating || '';
-        
-        this.setStatus(`已选择: ${this.selectedPaper.title}`, 'success');
-        
+    buildFilledContext(paper) {
         const filterCtx = {
             year: this.activeFilters.year,
             venue: this.activeFilters.venue,
@@ -1367,62 +1260,225 @@ class FormFillingSidebar {
             yearStart: this.searchFilters?.yearStart || '',
             yearEnd: this.searchFilters?.yearEnd || ''
         };
-
-        this.filledContext = {
-            '论文标题': { label: '论文标题', answer: this.selectedPaper.title || '', fieldType: 'text' },
-            '论文作者': { label: '论文作者', answer: Array.isArray(this.selectedPaper.authors) ? this.selectedPaper.authors.join(', ') : (this.selectedPaper.authors || ''), fieldType: 'text' },
-            '期刊/会议': { label: '期刊/会议', answer: this.selectedPaper.venueFormatted || this.selectedPaper.venue || '', fieldType: 'text' },
-            '期刊/会议(原始)': { label: '期刊/会议(原始)', answer: this.selectedPaper.venueRaw || this.selectedPaper.venue || '', fieldType: 'text' },
-            '会议简称': { label: '会议简称', answer: this.selectedPaper.venueShort || '', fieldType: 'text' },
-            'CCF评级': { label: 'CCF评级', answer: this.selectedPaper.ccfRating || '', fieldType: 'text' },
-            '年份': { label: '年份', answer: this.selectedPaper.year || '', fieldType: 'text' },
-            'DOI': { label: 'DOI', answer: this.selectedPaper.doi || '', fieldType: 'text' },
-            '链接': { label: '链接', answer: this.selectedPaper.url || '', fieldType: 'url' },
-            '摘要': { label: '摘要', answer: this.selectedPaper.abstract || '', fieldType: 'text' },
-            '关键词': { label: '关键词', answer: Array.isArray(this.selectedPaper.keywords) ? this.selectedPaper.keywords.join(', ') : (this.selectedPaper.keywords || ''), fieldType: 'text' },
-            '引用次数': { label: '引用次数', answer: this.selectedPaper.citationCount != null ? String(this.selectedPaper.citationCount) : '', fieldType: 'text' },
-            '基金/资助': { label: '基金/资助', answer: Array.isArray(this.selectedPaper.grants) ? JSON.stringify(this.selectedPaper.grants) : (this.selectedPaper.grants || ''), fieldType: 'text' },
-            '文章号/编码': { label: '文章号/编码', answer: this.selectedPaper.articleNumber || '', fieldType: 'text' },
-            '起始页码': { label: '起始页码', answer: this.selectedPaper.firstPage || '', fieldType: 'text' },
-            '终止页码': { label: '终止页码', answer: this.selectedPaper.lastPage || '', fieldType: 'text' },
-            '页码范围': { label: '页码范围', answer: this.selectedPaper.pageRange || '', fieldType: 'text' },
-            '发表日期': { label: '发表日期', answer: this.selectedPaper.publicationDate || '', fieldType: 'text' },
-            '发表月份': { label: '发表月份', answer: this.selectedPaper.publicationMonth || '', fieldType: 'text' },
-            '发表日': { label: '发表日', answer: this.selectedPaper.publicationDay || '', fieldType: 'text' },
-            '会议举办日期': { label: '会议举办日期', answer: this.selectedPaper.conferenceEventDate || '', fieldType: 'text' },
-            '会议开始日期': { label: '会议开始日期', answer: this.selectedPaper.conferenceStartDate || '', fieldType: 'text' },
-            '会议结束日期': { label: '会议结束日期', answer: this.selectedPaper.conferenceEndDate || '', fieldType: 'text' },
-            '会议开始月份': { label: '会议开始月份', answer: this.selectedPaper.conferenceStartMonth || '', fieldType: 'text' },
-            '会议开始日': { label: '会议开始日', answer: this.selectedPaper.conferenceStartDay || '', fieldType: 'text' },
-            '会议结束月份': { label: '会议结束月份', answer: this.selectedPaper.conferenceEndMonth || '', fieldType: 'text' },
-            '会议结束日': { label: '会议结束日', answer: this.selectedPaper.conferenceEndDay || '', fieldType: 'text' },
-            '文章语言': { label: '文章语言', answer: this.selectedPaper.language || '', fieldType: 'text' },
-            '语言': { label: '语言', answer: this.selectedPaper.language || '', fieldType: 'text' },
-            '会议名称': { label: '会议名称', answer: this.selectedPaper.conferenceName || '', fieldType: 'text' },
-            '会议地点': { label: '会议地点', answer: this.selectedPaper.conferenceLocation || '', fieldType: 'text' },
+        const volumeIssue = [paper.volume || '', paper.issue ? `(${paper.issue})` : ''].join('').trim();
+        return {
+            '论文标题': { label: '论文标题', answer: paper.title || '', fieldType: 'text' },
+            '论文作者': { label: '论文作者', answer: Array.isArray(paper.authors) ? paper.authors.join(', ') : (paper.authors || ''), fieldType: 'text' },
+            '作者机构': { label: '作者机构', answer: Array.isArray(paper.authorAffiliations) ? paper.authorAffiliations.join('; ') : (paper.authorAffiliations || ''), fieldType: 'text' },
+            '期刊/会议': { label: '期刊/会议', answer: paper.venueFormatted || paper.venue || '', fieldType: 'text' },
+            '期刊/会议(原始)': { label: '期刊/会议(原始)', answer: paper.venueRaw || paper.venue || '', fieldType: 'text' },
+            '会议简称': { label: '会议简称', answer: paper.venueShort || '', fieldType: 'text' },
+            'CCF评级': { label: 'CCF评级', answer: paper.ccfRating || '', fieldType: 'text' },
+            '年份': { label: '年份', answer: paper.year || '', fieldType: 'text' },
+            'DOI': { label: 'DOI', answer: paper.doi || '', fieldType: 'text' },
+            '链接': { label: '链接', answer: paper.url || '', fieldType: 'url' },
+            '摘要': { label: '摘要', answer: paper.abstract || '', fieldType: 'text' },
+            '关键词': { label: '关键词', answer: Array.isArray(paper.keywords) ? paper.keywords.join(', ') : (paper.keywords || ''), fieldType: 'text' },
+            '引用次数': { label: '引用次数', answer: paper.citationCount != null ? String(paper.citationCount) : '', fieldType: 'text' },
+            '基金/资助': { label: '基金/资助', answer: this.formatFundingInfo(paper.funding || paper.grants), fieldType: 'text' },
+            '文章号/编码': { label: '文章号/编码', answer: paper.articleNumber || '', fieldType: 'text' },
+            '起始页码': { label: '起始页码', answer: paper.firstPage || '', fieldType: 'text' },
+            '终止页码': { label: '终止页码', answer: paper.lastPage || '', fieldType: 'text' },
+            '页码': { label: '页码', answer: paper.pageRange || '', fieldType: 'text' },
+            '页码范围': { label: '页码范围', answer: paper.pageRange || '', fieldType: 'text' },
+            '卷/期': { label: '卷/期', answer: volumeIssue, fieldType: 'text' },
+            '卷号': { label: '卷号', answer: paper.volume || '', fieldType: 'text' },
+            '期号': { label: '期号', answer: paper.issue || '', fieldType: 'text' },
+            '发表日期': { label: '发表日期', answer: paper.publicationDate || '', fieldType: 'text' },
+            '发表月份': { label: '发表月份', answer: paper.publicationMonth || '', fieldType: 'text' },
+            '发表日': { label: '发表日', answer: paper.publicationDay || '', fieldType: 'text' },
+            '会议举办日期': { label: '会议举办日期', answer: paper.conferenceEventDate || '', fieldType: 'text' },
+            '会议开始日期': { label: '会议开始日期', answer: paper.conferenceStartDate || '', fieldType: 'text' },
+            '会议结束日期': { label: '会议结束日期', answer: paper.conferenceEndDate || '', fieldType: 'text' },
+            '会议开始月份': { label: '会议开始月份', answer: paper.conferenceStartMonth || '', fieldType: 'text' },
+            '会议开始日': { label: '会议开始日', answer: paper.conferenceStartDay || '', fieldType: 'text' },
+            '会议结束月份': { label: '会议结束月份', answer: paper.conferenceEndMonth || '', fieldType: 'text' },
+            '会议结束日': { label: '会议结束日', answer: paper.conferenceEndDay || '', fieldType: 'text' },
+            '文章语言': { label: '文章语言', answer: paper.language || '', fieldType: 'text' },
+            '语言': { label: '语言', answer: paper.language || '', fieldType: 'text' },
+            '会议名称': { label: '会议名称', answer: paper.conferenceName || paper.conferenceTitle || '', fieldType: 'text' },
+            '会议地点': { label: '会议地点', answer: paper.conferenceLocation || '', fieldType: 'text' },
             '作者检索词': { label: '作者检索词', answer: this.currentAuthor || '', fieldType: 'text' },
             '筛选条件': { label: '筛选条件', answer: JSON.stringify(filterCtx), fieldType: 'text' },
-            '数据来源': { label: '数据来源', answer: this.selectedPaper.source || this.currentSource || '', fieldType: 'text' }
+            '数据来源': { label: '数据来源', answer: paper.source || this.currentSource || '', fieldType: 'text' }
         };
+    }
+
+    inferPaperMetadataNeeds() {
+        const allText = (this.currentFormFields || [])
+            .map(f => `${f.label || ''} ${f.name || ''} ${f.placeholder || ''} ${f.description || ''}`)
+            .join(' ')
+            .toLowerCase();
+        const includesAny = (...patterns) => patterns.some(pattern => allText.includes(pattern));
+        return {
+            abstract: this.requiredPaperFields.includes('abstract'),
+            keywords: this.requiredPaperFields.includes('keywords'),
+            citationCount: this.requiredPaperFields.includes('citationCount'),
+            grants: this.requiredPaperFields.includes('grants'),
+            pages: includesAny('页码', '起始页', '终止页', 'page', 'pages'),
+            publicationDate: includesAny('发表日期', '出版日期', '发表月份', '发表日', 'publication date', 'publish date', 'month', 'day'),
+            language: includesAny('语言', 'language'),
+            conference: includesAny('会议名称', '会议地点', '会议举办日期', '会议开始日期', '会议结束日期', 'conference', 'event', 'location'),
+            volumeIssue: includesAny('卷/期', '卷号', '期号', 'volume', 'issue'),
+            authorAffiliations: includesAny('作者机构', '工作单位', 'affiliation', '机构')
+        };
+    }
+
+    getMissingMetadataKeys(paper, needs) {
+        const missing = [];
+        const isBlank = (value) => {
+            if (value == null) return true;
+            if (Array.isArray(value)) return value.length === 0;
+            return String(value).trim() === '';
+        };
+        const requireWhenNeeded = (needed, key, value) => {
+            if (needed && isBlank(value)) missing.push(key);
+        };
+
+        requireWhenNeeded(true, 'title', paper.title);
+        requireWhenNeeded(true, 'authors', paper.authors);
+        requireWhenNeeded(true, 'venue', paper.venue || paper.conferenceName);
+        requireWhenNeeded(true, 'year', paper.year);
+        requireWhenNeeded(true, 'doi', paper.doi);
+
+        requireWhenNeeded(needs.abstract, 'abstract', paper.abstract);
+        requireWhenNeeded(needs.keywords, 'keywords', paper.keywords);
+        requireWhenNeeded(needs.citationCount, 'citationCount', paper.citationCount);
+        requireWhenNeeded(needs.grants, 'grants', paper.funding || paper.grants);
+        requireWhenNeeded(needs.pages, 'pages', paper.pageRange || `${paper.firstPage || ''}${paper.lastPage || ''}`);
+        requireWhenNeeded(needs.publicationDate, 'publicationDate', paper.publicationDate);
+        requireWhenNeeded(needs.language, 'language', paper.language);
+        requireWhenNeeded(needs.conference, 'conference', paper.conferenceName || paper.conferenceLocation || paper.conferenceEventDate);
+        requireWhenNeeded(needs.volumeIssue, 'volumeIssue', paper.volume || paper.issue);
+        requireWhenNeeded(needs.authorAffiliations, 'authorAffiliations', paper.authorAffiliations);
+        return missing;
+    }
+
+    async enrichSelectedPaperMetadata(basePaper) {
+        const merged = { ...(basePaper || {}) };
+        const doi = merged.doi;
+        if (!doi) return merged;
+
+        const needs = this.inferPaperMetadataNeeds();
+        const needAbstract = needs.abstract;
+        const needKeywords = needs.keywords;
+        const needCitation = needs.citationCount;
+        const needGrants = needs.grants;
+        const baseFields = ['title', 'authors', 'year', 'venue', 'doi', 'url'];
+
+        const applyCommonMerge = (details, preferExisting = true) => {
+            if (!details || typeof details !== 'object') return;
+            const shouldWrite = (key) => {
+                if (details[key] == null || details[key] === '') return false;
+                if (!preferExisting) return true;
+                return merged[key] == null || merged[key] === '' || (Array.isArray(merged[key]) && merged[key].length === 0);
+            };
+            const copyField = (key) => {
+                if (shouldWrite(key)) {
+                    merged[key] = details[key];
+                }
+            };
+            const baseKeys = ['title', 'authors', 'authorAffiliations', 'venue', 'year', 'doi', 'url', 'source'];
+            for (const key of baseKeys) copyField(key);
+            for (const key of ['abstract', 'citationCount', 'articleNumber', 'firstPage', 'lastPage', 'pageRange', 'publicationDate', 'publicationMonth', 'publicationDay', 'conferenceEventDate', 'conferenceStartDate', 'conferenceEndDate', 'conferenceStartMonth', 'conferenceStartDay', 'conferenceEndMonth', 'conferenceEndDay', 'language', 'conferenceName', 'conferenceTitle', 'conferenceLocation', 'volume', 'issue', 'wosUid', 'documentType']) {
+                copyField(key);
+            }
+            if (Array.isArray(details.keywords) && details.keywords.length) {
+                merged.keywords = Array.from(new Set([...(merged.keywords || []), ...details.keywords])).filter(Boolean);
+            }
+            if (Array.isArray(details.grants) && details.grants.length && (!Array.isArray(merged.grants) || merged.grants.length === 0 || !preferExisting)) {
+                merged.grants = details.grants;
+            }
+            if (Array.isArray(details.funding) && details.funding.length && (!Array.isArray(merged.funding) || merged.funding.length === 0 || !preferExisting)) {
+                merged.funding = details.funding;
+            }
+            if (details.openAccessPdf && (!merged.openAccessPdf || !preferExisting)) merged.openAccessPdf = details.openAccessPdf;
+        };
+
+        let wosSuccess = false;
+        if (this.aiSettings.wosApiKey) {
+            this.setStatus('正在获取论文详细信息（WoS）...', 'searching');
+            const wosPaper = await getWosPaperByDoi(doi);
+            applyCommonMerge({ ...wosPaper, source: wosPaper?.source || 'Web of Science' }, false);
+            wosSuccess = true;
+        }
+
+        const missingAfterWos = this.getMissingMetadataKeys(merged, needs);
+        if (wosSuccess && missingAfterWos.length === 0) {
+            return merged;
+        }
+
+        let selectOpenAlex = [...baseFields];
+        if (needAbstract) selectOpenAlex.push('abstract_inverted_index');
+        if (needKeywords) selectOpenAlex.push('keywords');
+        if (needCitation) selectOpenAlex.push('cited_by_count');
+        if (needGrants) selectOpenAlex.push('grants');
+
+        let selectCrossref = [...baseFields];
+        if (needAbstract) selectCrossref.push('abstract');
+        if (needKeywords) selectCrossref.push('subject');
+        if (needCitation) selectCrossref.push('citationCount');
+
+        let selectS2 = [...baseFields];
+        if (needAbstract) selectS2.push('abstract');
+        if (needKeywords) selectS2.push('fieldsOfStudy');
+        if (needCitation) selectS2.push('citationCount');
+
+        const supplementalSources = [
+            () => getCrossrefPaperByDoi(doi, selectCrossref.join(',')),
+            () => getOpenAlexPaperByDoi(doi, selectOpenAlex.join(',')),
+            () => getSemanticScholarPaperByDoi(doi, selectS2.join(','))
+        ];
+        for (const fetchDetails of supplementalSources) {
+            try {
+                const details = await fetchDetails();
+                applyCommonMerge(details, true);
+            } catch (e) {
+                console.warn('补充数据源获取失败:', e.message);
+            }
+            if (this.getMissingMetadataKeys(merged, needs).length === 0) {
+                break;
+            }
+        }
+
+        return merged;
+    }
+
+    async selectPaper(paper) {
+        console.log('用户选择了论文:', paper);
+        this.selectedPaper = { ...(paper || {}) };
+        this.setStatus(`已选择: ${paper.title}，正在预取详细元数据...`, 'searching');
+        try {
+            this.selectedPaper = await this.enrichSelectedPaperMetadata(this.selectedPaper);
+        } catch (e) {
+            console.warn('补充论文元数据失败:', e);
+            this.setStatus(`详细元数据获取失败，将使用当前数据: ${e.message}`, 'warning');
+        }
+
+        const venueBase = this.selectedPaper.venue || this.selectedPaper.conferenceName || '';
+        const { formatted, shortName, rating } = this.formatVenueWithYearAndCCF(venueBase, this.selectedPaper.year);
+        this.selectedPaper.venueRaw = venueBase;
+        this.selectedPaper.venueFormatted = formatted || venueBase;
+        this.selectedPaper.venueShort = shortName || '';
+        this.selectedPaper.ccfRating = rating || '';
+
+        window.__tempAuthors = (this.selectedPaper.authors || []).map((name, index) => {
+            let affiliation = '';
+            if (this.selectedPaper.authorAffiliations && this.selectedPaper.authorAffiliations[index]) {
+                affiliation = this.selectedPaper.authorAffiliations[index];
+            }
+            return { name, affiliation };
+        });
+        this._tempAuthors = window.__tempAuthors;
+        console.log('✅ 已保存作者列表到 window.__tempAuthors:', window.__tempAuthors);
+        
+        this.filledContext = this.buildFilledContext(this.selectedPaper);
+        this.setStatus(`已选择: ${this.selectedPaper.title}，详细数据已缓存`, 'success');
 
         // 将作者列表存入发现缓存，供表格处理使用
         if (this.formFillingAgent) {
-            // 将作者列表存入临时变量，供后续 agent 使用
-            const authorsWithAffil = (this.selectedPaper.authors || []).map((name, index) => {
-                let affiliation = '';
-                if (this.selectedPaper.authorAffiliations && this.selectedPaper.authorAffiliations[index]) {
-                    affiliation = this.selectedPaper.authorAffiliations[index];
-                }
-                return { name, affiliation };
-            });
-
-            // 保存到临时属性，确保即使 agent 未创建也不会丢失
-            this._tempAuthors = authorsWithAffil;
-
-            // 如果 agent 已存在，直接存入缓存（兼容性处理）
-            if (this.formFillingAgent) {
-                this.formFillingAgent.discoveryCache._current_paper_authors = authorsWithAffil;
-            }
+            this.formFillingAgent.discoveryCache._current_paper_authors = this._tempAuthors;
+            this.formFillingAgent.filledContext = this.filledContext;
         }
         
         // 隐藏搜索区域，显示填表控制

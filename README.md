@@ -7,6 +7,8 @@ Firefox：运行 node switch-manifest.js firefox，然后在 about:debugging 中
 
 记得填写apikey
 
+运行python -m http.server 5500
+
 ## 项目概述
 
 这是一个融合了原有搜索助手和表单填写功能的全新浏览器插件，实现了完整的ReAct智能体架构，能够在浏览器环境中自动填写各种表单。

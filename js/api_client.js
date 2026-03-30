@@ -27,10 +27,15 @@ export const APIS = {
         MIN_INTERVAL: 100, // OpenAlex 很宽松
         PRIORITY: 4
     },
+    WOS: {
+        SEARCH: 'https://api.clarivate.com/api/wos',
+        MIN_INTERVAL: 1200,
+        PRIORITY: 5
+    },
     WIKIDATA: {
         SPARQL: 'https://query.wikidata.org/sparql',
         MIN_INTERVAL: 1000,
-        PRIORITY: 5
+        PRIORITY: 6
     }
 };
 
@@ -51,6 +56,7 @@ const sourceBackoffUntil = {
     SEMANTIC_SCHOLAR: 0,
     CROSSREF: 0,
     OPENALEX: 0,
+    WOS: 0,
     WIKIDATA: 0
 };
 
@@ -67,6 +73,48 @@ export const normalizeDoi = (doi) => {
     if (!doi) return '';
     const d = String(doi).trim();
     return d.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').trim();
+};
+
+const getStoredAISettings = () => {
+    if (typeof localStorage === 'undefined' || !localStorage.getItem) return {};
+    try {
+        return JSON.parse(localStorage.getItem('aiSettings') || '{}') || {};
+    } catch (e) {
+        return {};
+    }
+};
+
+const getStoredWosApiKey = () => {
+    const settings = getStoredAISettings();
+    return String(settings.wosApiKey || '').trim();
+};
+
+const WOS_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+const getWosCacheKey = (doi) => `_wos_cache_${normalizeDoi(doi).toLowerCase()}`;
+
+const readPersistentWosCache = (doi) => {
+    if (typeof localStorage === 'undefined' || !localStorage.getItem) return null;
+    try {
+        const raw = localStorage.getItem(getWosCacheKey(doi));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object' || !parsed.ts || !parsed.data) return null;
+        if ((Date.now() - parsed.ts) > WOS_CACHE_TTL_MS) {
+            localStorage.removeItem(getWosCacheKey(doi));
+            return null;
+        }
+        return parsed.data;
+    } catch (e) {
+        return null;
+    }
+};
+
+const writePersistentWosCache = (doi, data) => {
+    if (!doi || !data || typeof localStorage === 'undefined' || !localStorage.setItem) return;
+    try {
+        localStorage.setItem(getWosCacheKey(doi), JSON.stringify({ ts: Date.now(), data }));
+    } catch (e) {}
 };
 
 const openAlexInvertedIndexToText = (idx) => {
@@ -309,6 +357,7 @@ const requestTimestamps = {
     SEMANTIC_SCHOLAR: 0,
     CROSSREF: 0,
     OPENALEX: 0,
+    WOS: 0,
     WIKIDATA: 0
 };
 
@@ -348,6 +397,12 @@ export async function fetchWithRetry(url, source, retries = 3, initialDelay = 10
             if (source === 'SEMANTIC_SCHOLAR') {
                 const s2Key = (typeof localStorage !== 'undefined' && localStorage.getItem) ? (localStorage.getItem('semanticscholar_api_key') || '') : '';
                 if (s2Key) headers['x-api-key'] = s2Key;
+            }
+            if (source === 'WOS') {
+                const wosKey = getStoredWosApiKey();
+                if (!wosKey) throw new Error('未配置 WoS API Key');
+                headers['X-ApiKey'] = wosKey;
+                headers['Accept'] = 'application/json';
             }
             const response = await fetch(url, { headers });
             
@@ -754,6 +809,167 @@ async function getAllOpenAlexAuthorPublications(authorId, pageSize = 200) {
         if (all.length >= 20000) break;
     }
     return { total: total || all.length, source: 'OpenAlex', items: all };
+}
+
+const getNestedValue = (value, path, fallback = null) => {
+    const parts = Array.isArray(path) ? path : String(path || '').split('.');
+    let current = value;
+    for (const part of parts) {
+        if (current == null) return fallback;
+        current = current[part];
+    }
+    return current == null ? fallback : current;
+};
+
+const collectNestedArray = (root, candidates) => {
+    for (const path of candidates) {
+        const value = getNestedValue(root, path);
+        if (Array.isArray(value) && value.length) return value;
+        if (value && typeof value === 'object') return [value];
+    }
+    return [];
+};
+
+const firstNonEmptyString = (...values) => {
+    for (const value of values) {
+        if (value == null) continue;
+        const str = String(value).trim();
+        if (str) return str;
+    }
+    return '';
+};
+
+const parseWosPageRange = (page) => {
+    const raw = String(page || '').trim();
+    if (!raw) return { firstPage: '', lastPage: '', pageRange: '' };
+    return parsePageRange(raw);
+};
+
+const parseWosPublicationParts = (sortdate, year) => {
+    const parts = parseIsoDateParts(sortdate || '');
+    if (parts.publicationYear) return parts;
+    const y = year != null ? String(year).trim() : '';
+    return { publicationDate: y, publicationYear: y, publicationMonth: '', publicationDay: '' };
+};
+
+const parseWosAuthors = (record) => {
+    const names = [];
+    const affiliations = [];
+    const seenNames = new Set();
+    const nameEntries = collectNestedArray(record, [
+        'static_data.summary.names.name',
+        'static_data.fullrecord_metadata.addresses.address_name.names.name',
+        'static_data.item.authors.authors'
+    ]);
+    for (const item of nameEntries) {
+        const fullName = firstNonEmptyString(item.full_name, item.display_name, item.wos_standard, item.fullName);
+        if (fullName && !seenNames.has(fullName)) {
+            seenNames.add(fullName);
+            names.push(fullName);
+        }
+    }
+    const addressEntries = collectNestedArray(record, [
+        'static_data.fullrecord_metadata.addresses.address_name',
+        'static_data.fullrecord_metadata.addresses.address_spec',
+        'static_data.fullrecord_metadata.addresses'
+    ]);
+    for (const addr of addressEntries) {
+        const addressSpec = addr.address_spec || addr.addressSpec || addr;
+        const orgs = collectNestedArray(addressSpec, ['organizations.organization', 'organization']);
+        const orgNames = orgs.map(org => firstNonEmptyString(org.content, org.pref, org.name)).filter(Boolean);
+        const addressText = firstNonEmptyString(
+            orgNames.join(', '),
+            addressSpec.full_address,
+            [addressSpec.city, addressSpec.state, addressSpec.country].filter(Boolean).join(', ')
+        );
+        if (addressText) affiliations.push(addressText);
+    }
+    return {
+        authors: names,
+        authorAffiliations: Array.from(new Set(affiliations)).filter(Boolean)
+    };
+};
+
+const normalizeWosRecord = (record, doi) => {
+    const summary = getNestedValue(record, 'static_data.summary', {}) || {};
+    const titles = collectNestedArray(summary, ['titles.title']);
+    const sourceTitles = titles.filter(t => String(t.type || '').toLowerCase() === 'source');
+    const itemTitles = titles.filter(t => String(t.type || '').toLowerCase() !== 'source');
+    const pubInfo = summary.pub_info || {};
+    const fullMeta = getNestedValue(record, 'static_data.fullrecord_metadata', {}) || {};
+    const keywordsPlus = collectNestedArray(fullMeta, ['keywords_plus.keyword']);
+    const authorKeywords = collectNestedArray(fullMeta, ['keywords.keyword']);
+    const fundings = collectNestedArray(fullMeta, ['fund_ack.grants.grant', 'fund_ack.grant']);
+    const abstractParts = collectNestedArray(fullMeta, ['abstracts.abstract.abstract_text.p', 'abstracts.abstract.abstract_text', 'abstracts.abstract.p']);
+    const normalizedAuthors = parseWosAuthors(record);
+    const pageInfo = parseWosPageRange(pubInfo.page || pubInfo.pages);
+    const publicationParts = parseWosPublicationParts(pubInfo.sortdate || pubInfo.sort_date, pubInfo.pubyear || pubInfo.year);
+    const conferenceInfo = getNestedValue(fullMeta, 'conference_info', {}) || {};
+    const title = firstNonEmptyString(
+        ...itemTitles.map(t => t.content || t.value || t),
+        getNestedValue(record, 'title.value', ''),
+        getNestedValue(record, 'title', '')
+    );
+    const venue = firstNonEmptyString(
+        ...sourceTitles.map(t => t.content || t.value || t),
+        conferenceInfo.conference_title,
+        getNestedValue(record, 'source.title', '')
+    );
+    const abstract = abstractParts.map(part => {
+        if (typeof part === 'string') return part.trim();
+        return firstNonEmptyString(part.content, part.value, part);
+    }).filter(Boolean).join(' ');
+    const keywords = [
+        ...keywordsPlus.map(item => firstNonEmptyString(item.content, item.value, item)),
+        ...authorKeywords.map(item => firstNonEmptyString(item.content, item.value, item))
+    ].filter(Boolean);
+    const funding = fundings.map(item => ({
+        funder: firstNonEmptyString(item.grant_agency, item.agency, item.funder_name),
+        awardId: firstNonEmptyString(item.grant_ids?.grant_id, item.grant_id, item.award_id)
+    })).filter(item => item.funder || item.awardId);
+    return {
+        title,
+        authors: normalizedAuthors.authors,
+        authorAffiliations: normalizedAuthors.authorAffiliations,
+        venue,
+        year: firstNonEmptyString(pubInfo.pubyear, pubInfo.year),
+        doi: normalizeDoi(doi),
+        url: `https://www.webofscience.com/wos/woscc/full-record/${encodeURIComponent(firstNonEmptyString(record.UID, record.uid))}`,
+        source: 'Web of Science',
+        sourceType: 'wos',
+        wosUid: firstNonEmptyString(record.UID, record.uid),
+        documentType: firstNonEmptyString(getNestedValue(record, 'static_data.summary.doctypes.doctype.content', ''), getNestedValue(record, 'static_data.summary.doctypes.doctype', '')),
+        abstract,
+        keywords: Array.from(new Set(keywords)),
+        citationCount: getNestedValue(record, 'dynamic_data.citation_related.tc_list.silo_tc.local_count', null),
+        funding,
+        grants: funding,
+        articleNumber: firstNonEmptyString(pubInfo.article_no, pubInfo.article_number),
+        volume: firstNonEmptyString(pubInfo.vol, pubInfo.volume),
+        issue: firstNonEmptyString(pubInfo.issue),
+        language: normalizeLanguageCode(firstNonEmptyString(getNestedValue(fullMeta, 'normalized_languages.language', ''), getNestedValue(fullMeta, 'languages.language', ''))),
+        conferenceName: firstNonEmptyString(conferenceInfo.conference_title, conferenceInfo.conference_name),
+        conferenceTitle: firstNonEmptyString(conferenceInfo.conference_title, conferenceInfo.conference_name),
+        conferenceLocation: firstNonEmptyString(conferenceInfo.conference_location, conferenceInfo.conference_city, conferenceInfo.conference_country),
+        conferenceEventDate: firstNonEmptyString(conferenceInfo.conference_dates, conferenceInfo.conference_date),
+        ...publicationParts,
+        ...pageInfo
+    };
+};
+
+async function getWosPaperByDoi(doi) {
+    const d = normalizeDoi(doi);
+    if (!d) throw new Error('DOI 为空');
+    const cached = readPersistentWosCache(d);
+    if (cached) return cached;
+    const url = `${APIS.WOS.SEARCH}?databaseId=WOS&count=1&firstRecord=1&usrQuery=${encodeURIComponent(`DO=${d}`)}`;
+    const data = await fetchWithRetry(url, 'WOS', 2, 1500);
+    const records = collectNestedArray(data, ['Data.Records.records.REC', 'Data.records.REC', 'records.REC', 'Records.records.REC']);
+    const record = records[0] || null;
+    if (!record) throw new Error('WoS 未找到该 DOI');
+    const paper = normalizeWosRecord(record, d);
+    writePersistentWosCache(d, paper);
+    return paper;
 }
 
 async function getSemanticScholarPaperByDoi(doi, fields = null) {
@@ -1219,4 +1435,4 @@ export async function unifiedGetPublications(author, offset = 0, limit = 10, fil
     return { total: 0, items: [], error: '未找到相关论文' };
 }
 
-export { getSemanticScholarPaperByDoi, getCrossrefPaperByDoi, getOpenAlexPaperByDoi };
+export { getSemanticScholarPaperByDoi, getCrossrefPaperByDoi, getOpenAlexPaperByDoi, getWosPaperByDoi };
