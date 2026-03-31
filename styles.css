@@ -547,3 +547,45 @@ body {
     outline: none;
     box-shadow: 0 0 0 1px #4299e1;
 }
+
+.fill-mode-area {
+    margin: 15px 0;
+    padding: 14px;
+    background: #f8fafc;
+    border: 1px solid #dbeafe;
+    border-radius: 10px;
+}
+
+.fill-mode-area h4 {
+    margin-bottom: 8px;
+    color: #1e40af;
+    font-size: 15px;
+}
+
+.fill-mode-desc {
+    margin-bottom: 12px;
+    color: #475569;
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.fill-mode-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.fill-mode-actions .btn {
+    width: 100%;
+}
+
+.fill-mode-summary {
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 8px;
+    color: #1e3a8a;
+    font-size: 12px;
+    line-height: 1.6;
+}

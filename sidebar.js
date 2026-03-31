@@ -7,6 +7,7 @@ import { FormFillingAgent } from './js/form_agent.js';
 import { EnhancedToolExecutor } from './js/tool_executor.js';
 import { fetchCrawl4AIPageContent } from './js/crawl4ai_client.js';
 import { extractFormFieldsFromHtml } from './js/schema_extractor_adapter.js';
+import { WholeFormPlanner } from './js/whole_form_planner.js';
 import { unifiedSearchAuthors, unifiedGetPublications, getPaperByDOI,  unifiedSearchPapers, searchConferenceEventDate } from './js/api_client.js';
 import { getSemanticScholarPaperByDoi, getCrossrefPaperByDoi, getOpenAlexPaperByDoi, getWosPaperByDoi } from './js/api_client.js';
 class FormFillingSidebar {
@@ -39,6 +40,7 @@ class FormFillingSidebar {
         this.batchExecutionCancelled = false;
         this.activeAIRequestId = 0;
         this.ignoredAIRequestIds = new Set();
+        this.fillMode = 'step';
         
         // 作者搜索相关状态
         this.currentAuthor = '';
@@ -311,6 +313,10 @@ class FormFillingSidebar {
         this.quitFillingBtn = document.getElementById('quitFilling');
         
         // 填表统计
+        this.fillModeArea = document.getElementById('fillModeArea');
+        this.startWholeFormMatchBtn = document.getElementById('startWholeFormMatch');
+        this.startGradualFillBtn = document.getElementById('startGradualFill');
+        this.wholeFormSummary = document.getElementById('wholeFormSummary');
         this.fillingStats = document.getElementById('fillingStats');
         this.filledCount = document.getElementById('filledCount');
         this.totalFields = document.getElementById('totalFields');
@@ -378,6 +384,8 @@ class FormFillingSidebar {
         
         // 填表控制事件
         this.startFillingBtn?.addEventListener('click', () => this.startFillingProcess());
+        this.startGradualFillBtn?.addEventListener('click', () => this.startFillingProcess());
+        this.startWholeFormMatchBtn?.addEventListener('click', () => this.startWholeFormMatchProcess());
         this.pauseFillingBtn?.addEventListener('click', () => this.pauseFillingProcess());
         this.resumeFillingBtn?.addEventListener('click', () => this.resumeFillingProcess());
         this.stopFillingBtn?.addEventListener('click', () => this.stopFillingProcess());
@@ -1304,6 +1312,127 @@ class FormFillingSidebar {
         };
     }
 
+    showFillModeChoice() {
+        if (this.fillModeArea) this.fillModeArea.style.display = 'block';
+        if (this.startWholeFormMatchBtn) this.startWholeFormMatchBtn.disabled = false;
+        if (this.startGradualFillBtn) this.startGradualFillBtn.disabled = false;
+        if (this.wholeFormSummary) {
+            this.wholeFormSummary.style.display = 'none';
+            this.wholeFormSummary.textContent = '';
+        }
+        this.fillingProgress.style.display = 'none';
+        this.fillingControls.style.display = 'none';
+        this.fillingStats.style.display = 'none';
+        this.fieldProcessingArea.style.display = 'none';
+        this.optionsDisplay.style.display = 'none';
+        this.aiThinkingDisplay.style.display = 'none';
+    }
+
+    hideFillModeChoice() {
+        if (this.fillModeArea) this.fillModeArea.style.display = 'none';
+        if (this.wholeFormSummary) {
+            this.wholeFormSummary.style.display = 'none';
+            this.wholeFormSummary.textContent = '';
+        }
+    }
+
+    resetFillingRunState() {
+        this.fillingInProgress = true;
+        this.currentFieldIndex = 0;
+        this.currentGroupIndex = 0;
+        this.currentFieldIndexInGroup = 0;
+        this.filledFields = {};
+        this.batchProcessedGroups = new Set();
+        this.currentBatchPattern = null;
+        this.activeAIRequestId = 0;
+        this.ignoredAIRequestIds.clear();
+        this.updateStats(0, 0, 0, 0);
+        this.progressFill.style.width = '0%';
+        this.progressInfo.textContent = `已填写 0/${this.currentFormFields.length} 个字段`;
+    }
+
+    syncSelectedPaperToAgentCache() {
+        if (!this.formFillingAgent || !this.selectedPaper) return;
+        if (this._tempAuthors && this._tempAuthors.length > 0) {
+            this.formFillingAgent.discoveryCache._current_paper_authors = this._tempAuthors;
+        }
+        const title = this.selectedPaper.title;
+        this.formFillingAgent.discoveryCache[`_paper_meta_for_${title}`] = {
+            title: title,
+            authors: this.selectedPaper.authors,
+            venue: this.selectedPaper.venueFormatted || this.selectedPaper.venue,
+            venueRaw: this.selectedPaper.venueRaw || this.selectedPaper.venue,
+            venueShort: this.selectedPaper.venueShort || '',
+            ccfRating: this.selectedPaper.ccfRating || '',
+            year: this.selectedPaper.year,
+            doi: this.selectedPaper.doi,
+            url: this.selectedPaper.url,
+            abstract: this.selectedPaper.abstract || '',
+            keywords: this.selectedPaper.keywords || [],
+            citationCount: this.selectedPaper.citationCount,
+            grants: this.selectedPaper.grants || [],
+            articleNumber: this.selectedPaper.articleNumber || '',
+            firstPage: this.selectedPaper.firstPage || '',
+            lastPage: this.selectedPaper.lastPage || '',
+            pageRange: this.selectedPaper.pageRange || '',
+            publicationDate: this.selectedPaper.publicationDate || '',
+            publicationMonth: this.selectedPaper.publicationMonth || '',
+            publicationDay: this.selectedPaper.publicationDay || '',
+            conferenceEventDate: this.selectedPaper.conferenceEventDate || '',
+            conferenceStartDate: this.selectedPaper.conferenceStartDate || '',
+            conferenceEndDate: this.selectedPaper.conferenceEndDate || '',
+            conferenceStartMonth: this.selectedPaper.conferenceStartMonth || '',
+            conferenceStartDay: this.selectedPaper.conferenceStartDay || '',
+            conferenceEndMonth: this.selectedPaper.conferenceEndMonth || '',
+            conferenceEndDay: this.selectedPaper.conferenceEndDay || '',
+            language: this.selectedPaper.language || '',
+            conferenceName: this.selectedPaper.conferenceName || '',
+            conferenceLocation: this.selectedPaper.conferenceLocation || '',
+            conferenceEvent: this.selectedPaper.conferenceEvent || null,
+            organizers: this.selectedPaper.organizers || []
+        };
+        this.formFillingAgent.discoveryCache[`_venue_for_${title}`] = this.selectedPaper.venueFormatted || this.selectedPaper.venue;
+        this.formFillingAgent.discoveryCache[`_venue_raw_for_${title}`] = this.selectedPaper.venueRaw || this.selectedPaper.venue;
+        this.formFillingAgent.discoveryCache[`_year_for_${title}`] = this.selectedPaper.year;
+        if (this.selectedPaper.abstract) this.formFillingAgent.discoveryCache[`_abstract_for_${title}`] = this.selectedPaper.abstract;
+        if (this.selectedPaper.keywords && this.selectedPaper.keywords.length) {
+            this.formFillingAgent.discoveryCache[`_keywords_for_${title}`] = Array.isArray(this.selectedPaper.keywords) ? this.selectedPaper.keywords.join(', ') : this.selectedPaper.keywords;
+        }
+        if (this.selectedPaper.citationCount != null) this.formFillingAgent.discoveryCache[`_citation_for_${title}`] = this.selectedPaper.citationCount;
+        this.formFillingAgent.filledContext = this.filledContext;
+    }
+
+    async initializeFillingRuntime() {
+        const llmClient = new DeepSeekLLM(this.aiSettings.apiKey, this.aiSettings.model);
+        const toolExecutor = new EnhancedToolExecutor(this.formTabId);
+        this.formFillingAgent = new FormFillingAgent(llmClient, toolExecutor, (stepInfo) => {
+            this.handleAgentStep(stepInfo);
+        });
+        this.formFillingAgent.formTabId = this.formTabId;
+
+        const formStructure = {
+            title: '当前表单',
+            description: '通过填表助手填写的表单',
+            fields: this.currentFormFields
+        };
+
+        this.fieldGroups = await this.formFillingAgent._groupFields(this.currentFormFields, formStructure);
+        this.fieldGroups.forEach(group => {
+            if ((group.name && group.name.includes('作者')) || (group.label && group.label.includes('作者'))) {
+                group.isTable = true;
+                if (!group.children && group.fields) {
+                    group.children = group.fields.map(f => ({ ...f, isField: true }));
+                }
+            }
+        });
+        console.log('字段分组完成:', this.fieldGroups);
+
+        this.syncSelectedPaperToAgentCache();
+        this.detectRepeatedGroups();
+        this.batchProcessedGroups = new Set();
+        this.currentBatchPattern = null;
+    }
+
     inferPaperMetadataNeeds() {
         const allText = (this.currentFormFields || [])
             .map(f => `${f.label || ''} ${f.name || ''} ${f.placeholder || ''} ${f.description || ''}`)
@@ -1483,14 +1612,8 @@ class FormFillingSidebar {
         
         // 隐藏搜索区域，显示填表控制
         this.authorSearchArea.style.display = 'none';
-        this.fillingProgress.style.display = 'block';
-        this.fillingControls.style.display = 'grid';
-        this.fillingStats.style.display = 'block';
         this.startFillingBtn.disabled = false;
-
-        if (!this.fillingInProgress) {
-            this.startFillingProcess();
-        }
+        this.showFillModeChoice();
     }
 
     /**
@@ -1528,107 +1651,18 @@ class FormFillingSidebar {
             this.setStatus('请先解析表单', 'warning');
             return;
         }
-        
-        this.fillingInProgress = true;
-        this.currentFieldIndex = 0;
-        this.currentGroupIndex = 0;
-        this.currentFieldIndexInGroup = 0;
-        this.filledFields = {};
-        
+
+        this.fillMode = 'step';
+        this.hideFillModeChoice();
+        this.resetFillingRunState();
+        this.fillingProgress.style.display = 'block';
+        this.fillingControls.style.display = 'grid';
+        this.fillingStats.style.display = 'block';
         this.setStatus('开始对字段进行逻辑分组...', 'ai-thinking');
         this.startFillingBtn.disabled = true;
 
         try {
-            // 初始化 Agent
-            const llmClient = new DeepSeekLLM(this.aiSettings.apiKey, this.aiSettings.model);
-            const toolExecutor = new EnhancedToolExecutor(this.formTabId); // 传入当前表单标签页的 ID
-            
-            this.formFillingAgent = new FormFillingAgent(llmClient, toolExecutor, (stepInfo) => {
-                this.handleAgentStep(stepInfo);
-            });
-
-            // 将暂存的作者列表存入 agent 缓存
-            if (this._tempAuthors && this._tempAuthors.length > 0) {
-                this.formFillingAgent.discoveryCache._current_paper_authors = this._tempAuthors;
-            }
-            this.formFillingAgent.formTabId = this.formTabId; // 供 agent 内部使用
-
-            // 准备表单结构并分组
-            const formStructure = {
-                title: '当前表单',
-                description: '通过填表助手填写的表单',
-                fields: this.currentFormFields
-            };
-            
-            this.fieldGroups = await this.formFillingAgent._groupFields(this.currentFormFields, formStructure);
-            // 强制将作者相关的群组标记为表格
-            this.fieldGroups.forEach(group => {
-                // 如果群组名称或标签包含“作者”，则视为表格
-                if ((group.name && group.name.includes('作者')) || (group.label && group.label.includes('作者'))) {
-                    group.isTable = true;
-                    // 确保 children 存在（用于表格处理）
-                    if (!group.children && group.fields) {
-                        group.children = group.fields.map(f => ({ ...f, isField: true }));
-                    }
-                }
-            });
-            console.log('字段分组完成:', this.fieldGroups);
-            
-            // 注入已选择的论文信息到 Discovery Cache
-            if (this.selectedPaper) {
-                // 构造缓存键名（尽量覆盖常见变体）
-                const title = this.selectedPaper.title;
-                this.formFillingAgent.discoveryCache[`_paper_meta_for_${title}`] = {
-                    title: title,
-                    authors: this.selectedPaper.authors,
-                    venue: this.selectedPaper.venueFormatted || this.selectedPaper.venue,
-                    venueRaw: this.selectedPaper.venueRaw || this.selectedPaper.venue,
-                    venueShort: this.selectedPaper.venueShort || '',
-                    ccfRating: this.selectedPaper.ccfRating || '',
-                    year: this.selectedPaper.year,
-                    doi: this.selectedPaper.doi,
-                    url: this.selectedPaper.url,
-                    abstract: this.selectedPaper.abstract || '',
-                    keywords: this.selectedPaper.keywords || [],
-                    citationCount: this.selectedPaper.citationCount,
-                    grants: this.selectedPaper.grants || [],
-                    articleNumber: this.selectedPaper.articleNumber || '',
-                    firstPage: this.selectedPaper.firstPage || '',
-                    lastPage: this.selectedPaper.lastPage || '',
-                    pageRange: this.selectedPaper.pageRange || '',
-                    publicationDate: this.selectedPaper.publicationDate || '',
-                    publicationMonth: this.selectedPaper.publicationMonth || '',
-                    publicationDay: this.selectedPaper.publicationDay || '',
-                    conferenceEventDate: this.selectedPaper.conferenceEventDate || '',
-                    conferenceStartDate: this.selectedPaper.conferenceStartDate || '',
-                    conferenceEndDate: this.selectedPaper.conferenceEndDate || '',
-                    conferenceStartMonth: this.selectedPaper.conferenceStartMonth || '',
-                    conferenceStartDay: this.selectedPaper.conferenceStartDay || '',
-                    conferenceEndMonth: this.selectedPaper.conferenceEndMonth || '',
-                    conferenceEndDay: this.selectedPaper.conferenceEndDay || '',
-                    language: this.selectedPaper.language || '',
-                    conferenceName: this.selectedPaper.conferenceName || '',
-                    conferenceLocation: this.selectedPaper.conferenceLocation || '',
-                    conferenceEvent: this.selectedPaper.conferenceEvent || null,
-                    organizers: this.selectedPaper.organizers || []
-                };
-                // 单独字段缓存
-                this.formFillingAgent.discoveryCache[`_venue_for_${title}`] = this.selectedPaper.venueFormatted || this.selectedPaper.venue;
-                this.formFillingAgent.discoveryCache[`_venue_raw_for_${title}`] = this.selectedPaper.venueRaw || this.selectedPaper.venue;
-                this.formFillingAgent.discoveryCache[`_year_for_${title}`] = this.selectedPaper.year;
-                if (this.selectedPaper.abstract) this.formFillingAgent.discoveryCache[`_abstract_for_${title}`] = this.selectedPaper.abstract;
-                if (this.selectedPaper.keywords && this.selectedPaper.keywords.length) this.formFillingAgent.discoveryCache[`_keywords_for_${title}`] = Array.isArray(this.selectedPaper.keywords) ? this.selectedPaper.keywords.join(', ') : this.selectedPaper.keywords;
-                if (this.selectedPaper.citationCount != null) this.formFillingAgent.discoveryCache[`_citation_for_${title}`] = this.selectedPaper.citationCount;
-                
-                // 将 filledContext 同步给 agent
-                this.formFillingAgent.filledContext = this.filledContext;
-            }
-
-            // 【新增】识别重复模式
-            this.detectRepeatedGroups();
-            this.batchProcessedGroups = new Set();
-            this.currentBatchPattern = null;
-
+            await this.initializeFillingRuntime();
             this.setStatus('开始填表...', 'ready');
             
             // 开始填表循环
@@ -1637,6 +1671,184 @@ class FormFillingSidebar {
             console.error('初始化填表流程失败:', error);
             this.setStatus('初始化失败: ' + error.message, 'error');
             this.startFillingBtn.disabled = false;
+        }
+    }
+
+    showWholeFormSummary(summaryText) {
+        if (this.fillModeArea) this.fillModeArea.style.display = 'block';
+        if (!this.wholeFormSummary) return;
+        this.wholeFormSummary.textContent = summaryText || '';
+        this.wholeFormSummary.style.display = summaryText ? 'block' : 'none';
+    }
+
+    async startWholeFormMatchProcess() {
+        if (this.currentFormFields.length === 0) {
+            this.setStatus('请先解析表单', 'warning');
+            return;
+        }
+        if (!this.selectedPaper) {
+            this.setStatus('请先选择论文', 'warning');
+            return;
+        }
+
+        this.fillMode = 'whole';
+        this.hideFillModeChoice();
+        if (this.fillModeArea) this.fillModeArea.style.display = 'block';
+        if (this.startWholeFormMatchBtn) this.startWholeFormMatchBtn.disabled = true;
+        if (this.startGradualFillBtn) this.startGradualFillBtn.disabled = true;
+        this.resetFillingRunState();
+        this.fillingProgress.style.display = 'block';
+        this.fillingControls.style.display = 'grid';
+        this.fillingStats.style.display = 'block';
+        this.setStatus('正在生成整表匹配计划...', 'ai-thinking');
+        this.startFillingBtn.disabled = true;
+
+        try {
+            await this.initializeFillingRuntime();
+            const planner = new WholeFormPlanner(this.aiSettings.enableAI !== false ? this.formFillingAgent?.llmClient || null : null);
+            const planResult = await planner.createPlan({
+                paper: this.selectedPaper,
+                filledContext: this.filledContext,
+                fields: this.currentFormFields
+            });
+            const summary = await this.executeWholeFormPlan(planResult);
+            this.showWholeFormSummary(summary.text);
+
+            if (summary.remainingCount > 0) {
+                this.setStatus(`快速匹配已完成，已填写 ${summary.filledCount} 个字段，继续补全剩余 ${summary.remainingCount} 个字段`, 'success');
+                await this.moveToNextUnfilledField();
+                return;
+            }
+
+            this.setStatus(`快速匹配已完成，${summary.filledCount} 个字段已填写`, 'success');
+            this.finishFilling();
+        } catch (error) {
+            console.error('整表匹配失败:', error);
+            this.setStatus('整表匹配失败: ' + error.message, 'error');
+            this.startFillingBtn.disabled = false;
+        }
+    }
+
+    async executeWholeFormPlan(planResult) {
+        const planItems = Array.isArray(planResult?.plans) ? planResult.plans : [];
+        const threshold = Number(planResult?.autoFillThreshold) || 0.85;
+        let candidateCount = 0;
+        let filledCount = 0;
+        let deferredCount = 0;
+        let failedCount = 0;
+
+        for (const item of planItems) {
+            const field = this.currentFormFields.find(f => f.name === item.fieldName);
+            if (!field || this.filledFields[field.name]) {
+                continue;
+            }
+
+            const hasValue = Array.isArray(item.fillValue)
+                ? item.fillValue.length > 0
+                : String(item.fillValue || '').trim() !== '';
+
+            if (!hasValue || item.deferred || item.needsHuman || item.confidence < threshold) {
+                deferredCount++;
+                continue;
+            }
+
+            candidateCount++;
+            const applied = await this.applyFieldValue(
+                field,
+                item.fillValue,
+                'ai',
+                item.proposedValue || item.fillValue,
+                { moveNext: false, resetUI: false, setStatusOnSuccess: false }
+            );
+            if (applied) {
+                filledCount++;
+            } else {
+                failedCount++;
+            }
+        }
+
+        const remainingCount = this.currentFormFields.filter(field => !this.filledFields[field.name]).length;
+        return {
+            filledCount,
+            candidateCount,
+            deferredCount,
+            failedCount,
+            remainingCount,
+            text: `快速匹配已尝试 ${candidateCount} 个字段，成功填写 ${filledCount} 个，保留 ${remainingCount} 个字段继续逐项处理。`
+        };
+    }
+
+    async applyFieldValue(field, value, method, displayText = null, options = {}) {
+        if (!field) return false;
+
+        const {
+            moveNext = true,
+            resetUI = true,
+            setStatusOnSuccess = true
+        } = options;
+
+        if (resetUI) {
+            this.resetOptionsDisplay();
+            this.aiThinkingDisplay.style.display = 'none';
+            this.fieldActionChoice.style.display = 'none';
+        }
+
+        try {
+            const response = await this.sendMessageToBackground({
+                action: 'fillFormField',
+                data: {
+                    fieldName: field.name,
+                    value: value,
+                    fieldSelector: field.selector || '',
+                    tabId: this.formTabId
+                }
+            });
+
+            if (!response.success) {
+                this.setStatus('填写字段失败: ' + response.message, 'error');
+                return false;
+            }
+
+            const rawAnswerText = displayText != null ? displayText : value;
+            const answerText = Array.isArray(rawAnswerText) ? rawAnswerText.join('；') : rawAnswerText;
+
+            this.filledFields[field.name] = {
+                label: field.label || field.name,
+                answer: answerText,
+                value: value,
+                method: method,
+                fieldType: field.type || 'text',
+                timestamp: Date.now()
+            };
+
+            this.filledContext[field.name] = {
+                label: field.label || field.name,
+                answer: answerText,
+                fieldType: field.type || 'text'
+            };
+
+            if (this.formFillingAgent) {
+                this.formFillingAgent.filledContext = this.filledContext;
+            }
+
+            this.updateStats();
+            const totalFilled = Object.keys(this.filledFields).length;
+            const progressPercent = this.currentFormFields.length > 0 ? (totalFilled / this.currentFormFields.length) * 100 : 0;
+            this.progressFill.style.width = `${progressPercent}%`;
+            this.progressInfo.textContent = `已填写 ${totalFilled}/${this.currentFormFields.length} 个字段`;
+
+            if (setStatusOnSuccess) {
+                this.setStatus(`已填写 ${field.label || field.name}`, 'success');
+            }
+
+            if (moveNext) {
+                await this.moveToNextUnfilledField();
+            }
+            return true;
+        } catch (error) {
+            console.error('填写字段失败:', error);
+            this.setStatus('填写字段失败: ' + error.message, 'error');
+            return false;
         }
     }
 
@@ -2180,58 +2392,7 @@ class FormFillingSidebar {
     async fillCurrentFieldWithValue(value, method, displayText = null) {
         const field = this.activeField;
         if (!field) return;
-
-        // 立即重置 UI
-        this.resetOptionsDisplay();
-        this.aiThinkingDisplay.style.display = 'none';
-        this.fieldActionChoice.style.display = 'none';
-        
-        try {
-            // 通过 background 填写
-            const response = await this.sendMessageToBackground({
-                action: 'fillFormField',
-                data: {
-                    fieldName: field.name,
-                    value: value,
-                    fieldSelector: field.selector || '',
-                    tabId: this.formTabId
-                }
-            });
-            
-            if (response.success) {
-                // 记录已填写的字段
-                this.filledFields[field.name] = {
-                    label: field.label || field.name,
-                    answer: value,
-                    value: value,
-                    method: method,
-                    fieldType: field.type || 'text',
-                    timestamp: Date.now()
-                };
-                
-                // 同步上下文
-                this.filledContext[field.name] = {
-                    label: field.label || field.name,
-                    answer: value,
-                    fieldType: field.type || 'text'
-                };
-                
-                // 更新统计和进度
-                this.updateStats();
-                const totalFilled = Object.keys(this.filledFields).length;
-                const progressPercent = (totalFilled / this.currentFormFields.length) * 100;
-                this.progressFill.style.width = `${progressPercent}%`;
-                this.progressInfo.textContent = `已填写 ${Object.keys(this.filledFields).length}/${this.currentFormFields.length} 个字段`;
-                
-                // 移动到下一个未填字段
-                await this.moveToNextUnfilledField();
-            } else {
-                this.setStatus('填写字段失败: ' + response.message, 'error');
-            }
-        } catch (error) {
-            console.error('填写字段失败:', error);
-            this.setStatus('填写字段失败: ' + error.message, 'error');
-        }
+        await this.applyFieldValue(field, value, method, displayText);
     }
 
     showManualInputInterface(field) {
@@ -2466,66 +2627,8 @@ class FormFillingSidebar {
 
     async fillCurrentField(value, method) {
         const field = this.activeField;
-        const currentGroup = this.activeGroup;
-        
         if (!field) return;
-
-        // 立即重置 UI，避免上一个字段的选择框残留
-        this.resetOptionsDisplay();
-        this.aiThinkingDisplay.style.display = 'none';
-        this.fieldActionChoice.style.display = 'none';
-        
-        try {
-            // 通过background script与content script通信来填写字段
-            const response = await this.sendMessageToBackground({
-                action: 'fillFormField',
-                data: {
-                    fieldName: field.name,
-                    value: value,
-                    fieldSelector: field.selector || '',
-                    tabId: this.formTabId
-                }
-            });
-            
-            if (response.success) {
-                // 记录已填写的字段
-                this.filledFields[field.name] = {
-                    label: field.label || field.name,
-                    answer: value,
-                    value: value,
-                    method: method,
-                    fieldType: field.type || 'text',
-                    timestamp: Date.now()
-                };
-
-                // 同步更新上下文信息
-                this.filledContext[field.name] = {
-                    label: field.label || field.name,
-                    answer: value,
-                    fieldType: field.type || 'text'
-                };
-                
-                // 更新统计
-                const aiCount = Object.values(this.filledFields).filter(f => f.method === 'ai').length;
-                const manualCount = Object.values(this.filledFields).filter(f => f.method === 'manual').length;
-                const completionRate = Math.round(((this.currentFieldIndex + 1) / this.currentFormFields.length) * 100);
-                
-                this.updateStats(this.currentFieldIndex + 1, aiCount, manualCount, completionRate);
-                
-                // 更新进度条
-                const progressPercent = ((this.currentFieldIndex + 1) / this.currentFormFields.length) * 100;
-                this.progressFill.style.width = `${progressPercent}%`;
-                this.progressInfo.textContent = `已填写 ${this.currentFieldIndex + 1}/${this.currentFormFields.length} 个字段`;
-                
-                // 移动到下一个未填写的字段（跳过已填写和已跳过的字段）
-                await this.moveToNextUnfilledField();
-            } else {
-                this.setStatus('填写字段失败: ' + response.message, 'error');
-            }
-        } catch (error) {
-            console.error('填写字段失败:', error);
-            this.setStatus('填写字段失败: ' + error.message, 'error');
-        }
+        await this.applyFieldValue(field, value, method, value);
     }
 
     updateStats(filled, ai, manual, rate) {
@@ -2628,6 +2731,7 @@ class FormFillingSidebar {
     resetToStartPage() {
         // 重置填表相关状态
         this.fillingInProgress = false;
+        this.fillMode = 'step';
         this.currentFieldIndex = 0;
         this.currentGroupIndex = 0;
         this.currentFieldIndexInGroup = 0;
@@ -2661,6 +2765,7 @@ class FormFillingSidebar {
         this.fillingProgress.style.display = 'none';
         this.fillingControls.style.display = 'none';
         this.fillingStats.style.display = 'none';
+        this.hideFillModeChoice();
 
         // 显示开始页面（作者搜索区域 & 论文选择区域）
         this.authorSearchArea.style.display = 'block';

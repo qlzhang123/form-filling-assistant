@@ -252,6 +252,17 @@
                 </div>
                 
                 <!-- 填表统计 -->
+                <div class="fill-mode-area" id="fillModeArea" style="display: none;">
+                    <h4>选择填写模式</h4>
+                    <p class="fill-mode-desc">选定论文后，可先快速匹配整张表单，再回退到逐字段补全；原有逐字段流程也会完整保留。</p>
+                    <div class="fill-mode-actions">
+                        <button class="btn btn-primary" id="startWholeFormMatch">⚡ 快速匹配整个表单</button>
+                        <button class="btn btn-secondary" id="startGradualFill">🧭 继续逐字段分析</button>
+                    </div>
+                    <div class="fill-mode-summary" id="wholeFormSummary" style="display: none;"></div>
+                </div>
+
+                <!-- 填表统计 -->
                 <div class="filling-stats" id="fillingStats" style="display: none;">
                     <div class="stat-item">已填写: <span id="filledCount">0</span>/<span id="totalFields">0</span></div>
                     <div class="stat-item">AI填写: <span id="aiFilled">0</span></div>
