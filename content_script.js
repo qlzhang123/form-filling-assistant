@@ -1,6 +1,6 @@
-/**
- * 填表助手内容脚本
- * 用于与目标网页交互，执行DOM操作
+﻿/**
+ * 濉〃鍔╂墜鍐呭鑴氭湰
+ * 鐢ㄤ簬涓庣洰鏍囩綉椤典氦浜掞紝鎵цDOM鎿嶄綔
  */
 
 class FormFillingContentScript {
@@ -10,28 +10,28 @@ class FormFillingContentScript {
     }
 
     initialize() {
-        console.log('填表助手内容脚本初始化...');
+        console.log('濉〃鍔╂墜鍐呭鑴氭湰鍒濆鍖?..');
         
-        // 监听来自background script的消息
+        // 鐩戝惉鏉ヨ嚜background script鐨勬秷鎭?
         if (typeof chrome !== 'undefined' && chrome.runtime) {
             chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 this.handleMessage(request, sender, sendResponse);
-                // 返回true表示异步发送响应
+                // 杩斿洖true琛ㄧず寮傛鍙戦€佸搷搴?
                 return true;
             });
         }
         
         this.isConnected = true;
-        console.log('填表助手内容脚本连接成功');
+        console.log('濉〃鍔╂墜鍐呭鑴氭湰杩炴帴鎴愬姛');
     }
 
     handleMessage(request, sender, sendResponse) {
         /**
-         * 处理收到的消息
+         * 澶勭悊鏀跺埌鐨勬秷鎭?
          */
         const { action, data } = request;
         
-        console.log('收到消息:', action, data);
+        console.log('鏀跺埌娑堟伅:', action, data);
         
         switch (action) {
             case 'fillFormField':
@@ -43,7 +43,7 @@ class FormFillingContentScript {
                 break;
                 
             case 'getPageContent':
-                // 新增：直接返回页面 HTML，供 Sidebar 中的 FormParser + LLM 使用
+                // 鏂板锛氱洿鎺ヨ繑鍥為〉闈?HTML锛屼緵 Sidebar 涓殑 FormParser + LLM 浣跨敤
                 sendResponse({
                     success: true,
                     content: document.documentElement.outerHTML,
@@ -57,17 +57,17 @@ class FormFillingContentScript {
                 break;
 
             default:
-                console.warn('未知的消息动作:', action);
-                sendResponse({ success: false, message: `未知的动作: ${action}` });
+                console.warn('鏈煡鐨勬秷鎭姩浣?', action);
+                sendResponse({ success: false, message: `鏈煡鐨勫姩浣? ${action}` });
                 break;
         }
     }
 
     getElementLabel(element) {
         /**
-         * 获取元素的标签文本
+         * 鑾峰彇鍏冪礌鐨勬爣绛炬枃鏈?
          */
-        // 1. 尝试使用 element.labels (标准API)
+        // 1. 灏濊瘯浣跨敤 element.labels (鏍囧噯API)
         if (element.labels && element.labels.length > 0) {
             const labelText = Array.from(element.labels)
                                  .map(l => l.textContent.trim())
@@ -76,7 +76,7 @@ class FormFillingContentScript {
             if (labelText) return labelText;
         }
 
-        // 2. 通过for属性查找label
+        // 2. 閫氳繃for灞炴€ф煡鎵緇abel
         if (element.id) {
             const label = document.querySelector(`label[for="${element.id}"]`);
             if (label) {
@@ -85,14 +85,14 @@ class FormFillingContentScript {
             }
         }
 
-        // 3. 查找父级label
+        // 3. 鏌ユ壘鐖剁骇label
         let parent = element.parentElement;
         while (parent && parent.tagName.toLowerCase() !== 'form' && parent !== document.body) {
             if (parent.tagName.toLowerCase() === 'label') {
                 const text = parent.textContent.trim();
                 if (text) return text;
             }
-            // 如果父元素内有label但不是直接父级
+            // 濡傛灉鐖跺厓绱犲唴鏈塴abel浣嗕笉鏄洿鎺ョ埗绾?
             const internalLabel = parent.querySelector('label');
             if (internalLabel && internalLabel.contains(element)) {
                 const text = internalLabel.textContent.trim();
@@ -101,20 +101,20 @@ class FormFillingContentScript {
             parent = parent.parentElement;
         }
 
-        // 4. 查找前一个兄弟元素中的label
+        // 4. 鏌ユ壘鍓嶄竴涓厔寮熷厓绱犱腑鐨刲abel
         let sibling = element.previousElementSibling;
         while (sibling) {
             if (sibling.tagName.toLowerCase() === 'label') {
                 return sibling.textContent.trim();
             }
-            // 或者是包含文本的span/div
+            // 鎴栬€呮槸鍖呭惈鏂囨湰鐨剆pan/div
             if (['SPAN', 'DIV', 'TD'].includes(sibling.tagName) && sibling.textContent.trim().length > 0) {
                 return sibling.textContent.trim();
             }
             sibling = sibling.previousElementSibling;
         }
 
-        // 5. 查找aria-label或title或placeholder
+        // 5. 鏌ユ壘aria-label鎴杢itle鎴杙laceholder
         return element.getAttribute('aria-label') || 
                element.title || 
                element.placeholder || 
@@ -123,14 +123,14 @@ class FormFillingContentScript {
 
     parseDateString(value) {
         /**
-         * 解析日期字符串
-         * 支持格式：YYYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD, YYYY年MM月DD日
+         * 瑙ｆ瀽鏃ユ湡瀛楃涓?
+         * 鏀寔鏍煎紡锛歒YYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD, YYYY骞碝M鏈圖D鏃?
          */
         if (!value) return null;
         const str = String(value).trim();
         
-        // 尝试匹配常见格式
-        // 1. YYYY-MM-DD 或 YYYY/MM/DD 或 YYYY.MM.DD
+        // 灏濊瘯鍖归厤甯歌鏍煎紡
+        // 1. YYYY-MM-DD 鎴?YYYY/MM/DD 鎴?YYYY.MM.DD
         let match = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
         if (match) {
             return {
@@ -141,7 +141,7 @@ class FormFillingContentScript {
         }
         
         // 2. YYYY年MM月DD日
-        match = str.match(/^(\d{4})年(\d{1,2})月(\d{1,2})日$/);
+        match = str.match(/^(\d{4})年(\d{1,2})月(\d{1,2})日?$/);
         if (match) {
             return {
                 year: match[1],
@@ -165,7 +165,7 @@ class FormFillingContentScript {
 
     async fillFormField(fieldName, value, sendResponse, fieldSelector = '') {
         /**
-         * 填写表单字段
+         * 濉啓琛ㄥ崟瀛楁
          */
         try {
             const normalize = (s) => String(s || '')
@@ -178,33 +178,33 @@ class FormFillingContentScript {
             const mapEnZh = (v) => {
                 const x = String(v || '').trim().toLowerCase();
                 const m = {
-                    'conference': '会议论文',
-                    'conferencepaper': '会议论文',
-                    'proceedings': '会议论文',
-                    'oral': '分组报告',
-                    'sessiontalk': '分组报告',
-                    'talk': '分组报告',
-                    'invitedtalk': '特邀报告',
-                    'invited': '特邀报告',
-                    'poster': '墙报展示',
-                    'journal': '期刊论文',
-                    'journalarticle': '期刊论文',
-                    'article': '期刊论文',
-                    'thesis': '学位论文',
-                    'phdthesis': '学位论文',
-                    'mastersthesis': '学位论文',
+                    'conference': '浼氳璁烘枃',
+                    'conferencepaper': '浼氳璁烘枃',
+                    'proceedings': '浼氳璁烘枃',
+                    'oral': '鍒嗙粍鎶ュ憡',
+                    'sessiontalk': '鍒嗙粍鎶ュ憡',
+                    'talk': '鍒嗙粍鎶ュ憡',
+                    'invitedtalk': '鐗归個鎶ュ憡',
+                    'invited': '鐗归個鎶ュ憡',
+                    'poster': '澧欐姤灞曠ず',
+                    'journal': '鏈熷垔璁烘枃',
+                    'journalarticle': '鏈熷垔璁烘枃',
+                    'article': '鏈熷垔璁烘枃',
+                    'thesis': '瀛︿綅璁烘枃',
+                    'phdthesis': '瀛︿綅璁烘枃',
+                    'mastersthesis': '瀛︿綅璁烘枃',
                     'technicalreport': '技术报告',
                     'techreport': '技术报告',
                     'dataset': '数据集',
-                    'patent': '专利',
-                    'bookchapter': '著作章节',
-                    'chapter': '著作章节',
+                    'patent': '涓撳埄',
+                    'bookchapter': '钁椾綔绔犺妭',
+                    'chapter': '钁椾綔绔犺妭',
                     'preprint': '预印本',
                     'arxiv': '预印本',
-                    'english': '外文',
-                    'en': '外文',
-                    'chinese': '中文',
-                    'zh': '中文',
+                    'english': '澶栨枃',
+                    'en': '澶栨枃',
+                    'chinese': '涓枃',
+                    'zh': '涓枃',
                     'openaccess': '开放获取',
                     'oa': '开放获取',
                     'closedaccess': '非开放获取',
@@ -232,21 +232,21 @@ class FormFillingContentScript {
                 let groupKey = raw;
                 let subKey = '';
 
-                // 支持：字段 - 子字段
-                const dashParts = raw.split(/\s*[-－—–]\s*/);
+                // 鏀寔锛氬瓧娈?- 瀛愬瓧娈?
+                const dashParts = raw.split(/\s*[-–—]\s*/);
                 if (dashParts.length >= 2) {
                     groupKey = dashParts[0];
                     subKey = dashParts.slice(1).join('-');
                 }
 
-                // 支持：字段 (子字段) / 字段（子字段）
-                const parenMatch = raw.match(/[（(]\s*([^）)]+)\s*[）)]/);
+                // 鏀寔锛氬瓧娈?(瀛愬瓧娈? / 瀛楁锛堝瓙瀛楁锛?
+                const parenMatch = raw.match(/[锛?]\s*([^锛?]+)\s*[锛?]/);
                 if (parenMatch) {
                     groupKey = raw.replace(parenMatch[0], '').trim();
                     subKey = parenMatch[1].trim();
                 }
 
-                // 去掉序号后缀对 groupKey 的影响
+                // 鍘绘帀搴忓彿鍚庣紑瀵?groupKey 鐨勫奖鍝?
                 groupKey = groupKey.replace(/\[\d+\]\s*$/, '').trim();
 
                 return {
@@ -307,7 +307,7 @@ class FormFillingContentScript {
 
                     if (targetSub) {
                         if (meta.includes(targetSub)) score += 150;
-                        // 特殊关键词增强（起始/终止/开始/结束）
+                        // 鐗规畩鍏抽敭璇嶅寮猴紙璧峰/缁堟/寮€濮?缁撴潫锛?
                         if ((targetSub.includes(normalize('起始')) || targetSub.includes(normalize('开始'))) && meta.includes(normalize('起始'))) score += 30;
                         if ((targetSub.includes(normalize('终止')) || targetSub.includes(normalize('结束'))) && (meta.includes(normalize('终止')) || meta.includes(normalize('结束')))) score += 30;
                     }
@@ -322,7 +322,7 @@ class FormFillingContentScript {
                         if (pos === hints.indexHint) score += 120;
                     }
 
-                    // 轻微倾向：同类元素更优（例如包含 “页” 的输入优先 input）
+                    // 杞诲井鍊惧悜锛氬悓绫诲厓绱犳洿浼橈紙渚嬪鍖呭惈 鈥滈〉鈥?鐨勮緭鍏ヤ紭鍏?input锛?
                     if (el.tagName === 'INPUT') score += 5;
                     if (el.tagName === 'SELECT') score += 5;
 
@@ -462,7 +462,7 @@ class FormFillingContentScript {
             }
 
             if (!hasScopedSelectorMatches) {
-                // 查找所有可能的匹配元素
+                // 鏌ユ壘鎵€鏈夊彲鑳界殑鍖归厤鍏冪礌
                 const selectors = [
                     `[name="${fieldName}"]`,
                     `#${fieldName}`,
@@ -481,7 +481,7 @@ class FormFillingContentScript {
                 });
             }
 
-            // 去重并只保留可见元素
+            // 鍘婚噸骞跺彧淇濈暀鍙鍏冪礌
             let uniqueElements = [...new Set(allMatchedElements)].filter(el => this.isElementVisible(el));
 
             if (uniqueElements.length === 0 && !hasScopedSelectorMatches) {
@@ -492,7 +492,7 @@ class FormFillingContentScript {
             }
 
             if (uniqueElements.length === 0 && !hasScopedSelectorMatches) {
-                // 如果没有找到精确匹配，尝试通过标签文本模糊查找
+                // 濡傛灉娌℃湁鎵惧埌绮剧‘鍖归厤锛屽皾璇曢€氳繃鏍囩鏂囨湰妯＄硦鏌ユ壘
                 const allInputs = Array.from(document.querySelectorAll('input, select, textarea'));
                 for (const input of allInputs) {
                     if (!this.isElementVisible(input)) continue;
@@ -521,37 +521,35 @@ class FormFillingContentScript {
             }
 
             if (uniqueElements.length === 0) {
-                sendResponse({ success: false, message: `未找到字段 "${fieldName}"` });
+                sendResponse({ success: false, message: `鏈壘鍒板瓧娈?"${fieldName}"` });
                 return;
             }
 
-            // 选择最合适的元素（支持起始/终止等子字段、以及 [1]/[2] 序号）
+            // 閫夋嫨鏈€鍚堥€傜殑鍏冪礌锛堟敮鎸佽捣濮?缁堟绛夊瓙瀛楁銆佷互鍙?[1]/[2] 搴忓彿锛?
             let targetField = chooseBestElement(uniqueElements, fieldName) || uniqueElements[0];
 
-            // 根据字段类型填写
+            // 鏍规嵁瀛楁绫诲瀷濉啓
             const tagName = targetField.tagName.toLowerCase();
             const type = targetField.type;
 
             if (tagName === 'select') {
                 const r = selectNative(targetField, value);
                 if (r.ok) {
-                    sendResponse({ success: true, message: `下拉框 "${fieldName}" 选择成功: ${r.chosenText || value}` });
+                    sendResponse({ success: true, message: `涓嬫媺妗?"${fieldName}" 閫夋嫨鎴愬姛: ${r.chosenText || value}` });
                     return;
                 }
                 const r2 = await selectCustom(targetField, value);
                 if (r2.ok) {
-                    sendResponse({ success: true, message: `下拉框 "${fieldName}" 选择成功: ${r2.chosenText || value}` });
+                    sendResponse({ success: true, message: `涓嬫媺妗?"${fieldName}" 閫夋嫨鎴愬姛: ${r2.chosenText || value}` });
                 } else {
-                    sendResponse({ success: false, message: `下拉框 "${fieldName}" 未找到匹配选项: ${value}` });
+                    sendResponse({ success: false, message: `涓嬫媺妗?"${fieldName}" 鏈壘鍒板尮閰嶉€夐」: ${value}` });
                 }
             } else if (type === 'checkbox' || type === 'radio') {
-                // 单选/复选框逻辑（增强：优先按字段行聚合，再匹配中文/英文等同义）
                 let matched = false;
+                const requestedValues = Array.isArray(value) ? value : [value];
 
-                const getCandidates = (v) => {
-                    const arr = [String(v)];
-                    const n = String(v).trim().toLowerCase();
-                    // 常见别名映射
+                const getCandidates = (values) => {
+                    const arr = [];
                     const alias = {
                         'english': ['英文', 'English', '外文'],
                         'en': ['英文', 'English', '外文'],
@@ -560,7 +558,13 @@ class FormFillingContentScript {
                         'yes': ['是', 'Yes'],
                         'no': ['否', 'No']
                     };
-                    if (alias[n]) arr.push(...alias[n]);
+                    values.forEach(item => {
+                        const raw = String(item || '').trim();
+                        if (!raw) return;
+                        arr.push(raw);
+                        const normalized = raw.toLowerCase();
+                        if (alias[normalized]) arr.push(...alias[normalized]);
+                    });
                     return [...new Set(arr)];
                 };
 
@@ -574,7 +578,6 @@ class FormFillingContentScript {
                     return false;
                 };
 
-                // 尝试按字段行聚合
                 const target = normalize(fieldName);
                 let groupRow = null;
                 const rows = Array.from(document.querySelectorAll('.field-row'));
@@ -600,11 +603,10 @@ class FormFillingContentScript {
                     groupFields = uniqueElements.filter(el => el.type === type);
                 }
 
-                const candidates = getCandidates(value);
+                const candidates = getCandidates(requestedValues);
                 const getTextFor = (el) => {
                     let t = this.getElementLabel(el);
                     if (!t) {
-                        // 尝试相邻文本节点
                         const ns = el.nextSibling;
                         if (ns && ns.nodeType === Node.TEXT_NODE) {
                             t = ns.textContent.trim();
@@ -613,73 +615,74 @@ class FormFillingContentScript {
                     return t || el.value || '';
                 };
 
-                for (const gf of groupFields) {
-                    const t = getTextFor(gf);
-                    if (matchLabel(t, candidates) || matchLabel(gf.value, candidates)) {
-                        if (gf.type === 'radio') {
+                if (type === 'radio') {
+                    for (const gf of groupFields) {
+                        const t = getTextFor(gf);
+                        if (matchLabel(t, candidates) || matchLabel(gf.value, candidates)) {
                             groupFields.forEach(f => f.checked = false);
+                            try { gf.click(); } catch (_) {}
+                            gf.checked = true;
+                            gf.dispatchEvent(new Event('change', { bubbles: true }));
+                            matched = true;
+                            break;
                         }
-                        try { gf.click(); } catch (_) {}
-                        gf.checked = true;
-                        gf.dispatchEvent(new Event('change', { bubbles: true }));
-                        matched = true;
-                        break;
                     }
-                }
-                
-                if (matched) {
-                    sendResponse({ success: true, message: `选择框 "${fieldName}" 设置成功: ${value}` });
                 } else {
-                    // 如果作为选择框匹配失败，且有同名的文本框，尝试作为文本框填写
-                    const textFallback = uniqueElements.find(el => 
-                        el.tagName === 'TEXTAREA' || 
-                        (el.tagName === 'INPUT' && !['radio', 'checkbox'].includes(el.type))
-                    );
-                    if (textFallback) {
-                        textFallback.value = value;
-                        textFallback.dispatchEvent(new Event('input', { bubbles: true }));
-                        textFallback.dispatchEvent(new Event('change', { bubbles: true }));
-                        sendResponse({ success: true, message: `选择框匹配失败，已回退到文本框填写: ${value}` });
-                    } else {
-                        sendResponse({ success: false, message: `选择框 "${fieldName}" 未找到匹配项: ${value}` });
+                    groupFields.forEach(f => { f.checked = false; });
+                    let matchCount = 0;
+                    for (const gf of groupFields) {
+                        const t = getTextFor(gf);
+                        if (matchLabel(t, candidates) || matchLabel(gf.value, candidates)) {
+                            try { gf.click(); } catch (_) {}
+                            gf.checked = true;
+                            gf.dispatchEvent(new Event('change', { bubbles: true }));
+                            matchCount++;
+                        }
                     }
+                    matched = matchCount > 0;
+                }
+
+                if (matched) {
+                    sendResponse({ success: true, message: `选择框 "${fieldName}" 设置成功: ${Array.isArray(value) ? value.join('；') : value}` });
+                } else {
+                    sendResponse({ success: false, message: `选择框 "${fieldName}" 未找到匹配项: ${Array.isArray(value) ? value.join('；') : value}` });
                 }
             } else {
-                // 普通输入框
+                // 鏅€氳緭鍏ユ
                 
-                // 尝试智能日期拆分逻辑
-                // 用户需求：如果字段所在行有3个输入框，尝试按 年-月-日 拆分填写
+                // 灏濊瘯鏅鸿兘鏃ユ湡鎷嗗垎閫昏緫
+                // 鐢ㄦ埛闇€姹傦細濡傛灉瀛楁鎵€鍦ㄨ鏈?涓緭鍏ユ锛屽皾璇曟寜 骞?鏈?鏃?鎷嗗垎濉啓
                 const dateParts = this.parseDateString(value);
                 if (dateParts) {
                     const row = targetField.closest('.field-row') || targetField.parentElement;
                     if (row) {
-                        // 查找行内所有可见输入框
+                        // 鏌ユ壘琛屽唴鎵€鏈夊彲瑙佽緭鍏ユ
                         const visibleInputs = Array.from(row.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"])'))
                             .filter(el => this.isElementVisible(el));
                         
-                        // 规则：如果行内正好有3个输入框，且当前目标字段在其中
-                        // 我们假设这三个框分别是 年、月、日
+                        // 瑙勫垯锛氬鏋滆鍐呮濂芥湁3涓緭鍏ユ锛屼笖褰撳墠鐩爣瀛楁鍦ㄥ叾涓?
+                        // 鎴戜滑鍋囪杩欎笁涓鍒嗗埆鏄?骞淬€佹湀銆佹棩
                         if (visibleInputs.length === 3 && visibleInputs.includes(targetField)) {
-                             console.log('检测到日期分栏（3个输入框），尝试智能拆分填写...');
+                             console.log('妫€娴嬪埌鏃ユ湡鍒嗘爮锛?涓緭鍏ユ锛夛紝灏濊瘯鏅鸿兘鎷嗗垎濉啓...');
                              const [yInput, mInput, dInput] = visibleInputs;
                              
-                             // 填写年份
+                             // 濉啓骞翠唤
                              yInput.value = dateParts.year;
                              yInput.dispatchEvent(new Event('input', { bubbles: true }));
                              yInput.dispatchEvent(new Event('change', { bubbles: true }));
 
-                             // 填写月份
-                             // 检查月份输入框是否有 min/max 限制，或者 placeholder 是否暗示格式
+                             // 濉啓鏈堜唤
+                             // 妫€鏌ユ湀浠借緭鍏ユ鏄惁鏈?min/max 闄愬埗锛屾垨鑰?placeholder 鏄惁鏆楃ず鏍煎紡
                              mInput.value = dateParts.month;
                              mInput.dispatchEvent(new Event('input', { bubbles: true }));
                              mInput.dispatchEvent(new Event('change', { bubbles: true }));
 
-                             // 填写日期
+                             // 濉啓鏃ユ湡
                              dInput.value = dateParts.day;
                              dInput.dispatchEvent(new Event('input', { bubbles: true }));
                              dInput.dispatchEvent(new Event('change', { bubbles: true }));
                              
-                             sendResponse({ success: true, message: `日期字段 "${fieldName}" 智能拆分填写成功: ${value} -> ${dateParts.year}-${dateParts.month}-${dateParts.day}` });
+                             sendResponse({ success: true, message: `鏃ユ湡瀛楁 "${fieldName}" 鏅鸿兘鎷嗗垎濉啓鎴愬姛: ${value} -> ${dateParts.year}-${dateParts.month}-${dateParts.day}` });
                              return;
                         }
                     }
@@ -691,16 +694,16 @@ class FormFillingContentScript {
                 targetField.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
                 targetField.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
                 
-                sendResponse({ success: true, message: `字段 "${fieldName}" 填写成功: ${value}` });
+                sendResponse({ success: true, message: `瀛楁 "${fieldName}" 濉啓鎴愬姛: ${value}` });
             }
         } catch (error) {
-            sendResponse({ success: false, message: `填写字段失败: ${error.message}` });
+            sendResponse({ success: false, message: `濉啓瀛楁澶辫触: ${error.message}` });
         }
     }
 
     getPageElements(selector, sendResponse) {
         /**
-         * 获取页面元素信息
+         * 鑾峰彇椤甸潰鍏冪礌淇℃伅
          */
         try {
             const elements = Array.from(document.querySelectorAll(selector));
@@ -728,14 +731,14 @@ class FormFillingContentScript {
         } catch (error) {
             sendResponse({
                 success: false,
-                message: `获取页面元素失败: ${error.message}`
+                message: `鑾峰彇椤甸潰鍏冪礌澶辫触: ${error.message}`
             });
         }
     }
 
     getElementXPath(element) {
         /**
-         * 获取元素的XPath
+         * 鑾峰彇鍏冪礌鐨刋Path
          */
         if (element.id) {
             return `//*[@id="${element.id}"]`;
@@ -770,7 +773,7 @@ class FormFillingContentScript {
 
     isElementVisible(element) {
         /**
-         * 检查元素是否可见
+         * 妫€鏌ュ厓绱犳槸鍚﹀彲瑙?
          */
         const style = window.getComputedStyle(element);
         return element.offsetParent !== null && 
@@ -780,11 +783,11 @@ class FormFillingContentScript {
     }
 
     /**
-     * 点击指定选择器的元素
-     * @param {string} selector - CSS 选择器
-     * @param {function} sendResponse - 回调函数
+     * 鐐瑰嚮鎸囧畾閫夋嫨鍣ㄧ殑鍏冪礌
+     * @param {string} selector - CSS 閫夋嫨鍣?
+     * @param {function} sendResponse - 鍥炶皟鍑芥暟
      */
-    // 在 clickElement 方法中增加 XPath 支持
+    // 鍦?clickElement 鏂规硶涓鍔?XPath 鏀寔
     clickElement(selector, sendResponse) {
         try {
             let element;
@@ -796,18 +799,18 @@ class FormFillingContentScript {
                 element = document.querySelector(selector);
             }
             if (!element) {
-                sendResponse({ success: false, message: `未找到元素: ${selector}` });
+                sendResponse({ success: false, message: `鏈壘鍒板厓绱? ${selector}` });
                 return;
             }
             element.click();
             sendResponse({ success: true, message: '已点击元素' });
         } catch (error) {
-            sendResponse({ success: false, message: `点击元素失败: ${error.message}` });
+            sendResponse({ success: false, message: `鐐瑰嚮鍏冪礌澶辫触: ${error.message}` });
         }
     }
 }
 
-// 初始化内容脚本
+// 鍒濆鍖栧唴瀹硅剼鏈?
 (function() {
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => {
@@ -819,3 +822,4 @@ class FormFillingContentScript {
         new FormFillingContentScript();
     }
 })();
+

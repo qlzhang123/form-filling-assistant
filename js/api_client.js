@@ -90,6 +90,7 @@ const getStoredWosApiKey = () => {
 };
 
 const WOS_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const WOS_CACHE_VERSION = 2;
 
 const getWosCacheKey = (doi) => `_wos_cache_${normalizeDoi(doi).toLowerCase()}`;
 
@@ -100,6 +101,10 @@ const readPersistentWosCache = (doi) => {
         if (!raw) return null;
         const parsed = JSON.parse(raw);
         if (!parsed || typeof parsed !== 'object' || !parsed.ts || !parsed.data) return null;
+        if (parsed.version !== WOS_CACHE_VERSION) {
+            localStorage.removeItem(getWosCacheKey(doi));
+            return null;
+        }
         if ((Date.now() - parsed.ts) > WOS_CACHE_TTL_MS) {
             localStorage.removeItem(getWosCacheKey(doi));
             return null;
@@ -113,7 +118,7 @@ const readPersistentWosCache = (doi) => {
 const writePersistentWosCache = (doi, data) => {
     if (!doi || !data || typeof localStorage === 'undefined' || !localStorage.setItem) return;
     try {
-        localStorage.setItem(getWosCacheKey(doi), JSON.stringify({ ts: Date.now(), data }));
+        localStorage.setItem(getWosCacheKey(doi), JSON.stringify({ version: WOS_CACHE_VERSION, ts: Date.now(), data }));
     } catch (e) {}
 };
 
@@ -830,10 +835,50 @@ const collectNestedArray = (root, candidates) => {
     return [];
 };
 
+const flattenSourceText = (value, seen = new WeakSet(), depth = 0) => {
+    if (value == null || depth > 5) return '';
+    if (typeof value === 'string') return value.trim();
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value).trim();
+
+    if (Array.isArray(value)) {
+        return value
+            .map(item => flattenSourceText(item, seen, depth + 1))
+            .filter(Boolean)
+            .join('；');
+    }
+
+    if (typeof value === 'object') {
+        if (seen.has(value)) return '';
+        seen.add(value);
+
+        const directKeys = ['content', 'text', 'label', 'title', 'name', 'display_name', 'full_name', 'fullName'];
+        for (const key of directKeys) {
+            if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+            const direct = value[key];
+            if (typeof direct === 'string' || typeof direct === 'number' || typeof direct === 'boolean') {
+                const text = String(direct).trim();
+                if (text) return text;
+            }
+        }
+
+        if (Object.prototype.hasOwnProperty.call(value, 'value')) {
+            const nested = flattenSourceText(value.value, seen, depth + 1);
+            if (nested) return nested;
+        }
+
+        return Object.values(value)
+            .map(item => flattenSourceText(item, seen, depth + 1))
+            .filter(Boolean)
+            .join('；');
+    }
+
+    return String(value).trim();
+};
+
 const firstNonEmptyString = (...values) => {
     for (const value of values) {
         if (value == null) continue;
-        const str = String(value).trim();
+        const str = flattenSourceText(value);
         if (str) return str;
     }
     return '';
@@ -850,6 +895,54 @@ const parseWosPublicationParts = (sortdate, year) => {
     if (parts.publicationYear) return parts;
     const y = year != null ? String(year).trim() : '';
     return { publicationDate: y, publicationYear: y, publicationMonth: '', publicationDay: '' };
+};
+
+const normalizeWosTitleText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+
+const isLikelyVenueAbbreviation = (value) => {
+    const text = normalizeWosTitleText(value);
+    if (!text) return false;
+    if (text.length <= 4) return true;
+    if (text.length <= 24 && /^[A-Z0-9 .&-]+$/.test(text) && !/[a-z]/.test(text)) {
+        return true;
+    }
+    return false;
+};
+
+const chooseBestWosTitle = (titles, forbidden = []) => {
+    const banned = forbidden.map(item => normalizeWosTitleText(item).toLowerCase()).filter(Boolean);
+    const candidates = (Array.isArray(titles) ? titles : [])
+        .map(item => {
+            const raw = normalizeWosTitleText(item?.content || item?.value || item);
+            const type = String(item?.type || '').toLowerCase();
+            return { raw, type };
+        })
+        .filter(item => item.raw);
+
+    const scored = candidates.map(item => {
+        let score = 0;
+        if (item.type.includes('item')) score += 40;
+        if (item.type.includes('title')) score += 20;
+        if (item.type.includes('source')) score -= 120;
+        if (item.type.includes('short')) score -= 20;
+        if (item.type.includes('abbrev')) score -= 30;
+        if (banned.includes(item.raw.toLowerCase())) score -= 120;
+        if (isLikelyVenueAbbreviation(item.raw)) score -= 40;
+        score += Math.min(item.raw.length, 80);
+        if (/\s/.test(item.raw)) score += 8;
+        if (/[a-z]/.test(item.raw)) score += 6;
+        return { ...item, score };
+    }).sort((a, b) => b.score - a.score);
+
+    return scored[0]?.raw || '';
+};
+
+const chooseBestWosVenue = (titles) => {
+    const candidates = (Array.isArray(titles) ? titles : [])
+        .map(item => normalizeWosTitleText(item?.content || item?.value || item))
+        .filter(Boolean)
+        .sort((a, b) => b.length - a.length);
+    return candidates[0] || '';
 };
 
 const parseWosAuthors = (record) => {
@@ -905,15 +998,14 @@ const normalizeWosRecord = (record, doi) => {
     const pageInfo = parseWosPageRange(pubInfo.page || pubInfo.pages);
     const publicationParts = parseWosPublicationParts(pubInfo.sortdate || pubInfo.sort_date, pubInfo.pubyear || pubInfo.year);
     const conferenceInfo = getNestedValue(fullMeta, 'conference_info', {}) || {};
-    const title = firstNonEmptyString(
-        ...itemTitles.map(t => t.content || t.value || t),
-        getNestedValue(record, 'title.value', ''),
-        getNestedValue(record, 'title', '')
-    );
     const venue = firstNonEmptyString(
-        ...sourceTitles.map(t => t.content || t.value || t),
-        conferenceInfo.conference_title,
+        chooseBestWosVenue(sourceTitles),
         getNestedValue(record, 'source.title', '')
+    );
+    const title = firstNonEmptyString(
+        chooseBestWosTitle(itemTitles, [venue, conferenceInfo.conference_title, conferenceInfo.conference_name]),
+        normalizeWosTitleText(getNestedValue(record, 'title.value', '')),
+        normalizeWosTitleText(getNestedValue(record, 'title', ''))
     );
     const abstract = abstractParts.map(part => {
         if (typeof part === 'string') return part.trim();
@@ -927,6 +1019,12 @@ const normalizeWosRecord = (record, doi) => {
         funder: firstNonEmptyString(item.grant_agency, item.agency, item.funder_name),
         awardId: firstNonEmptyString(item.grant_ids?.grant_id, item.grant_id, item.award_id)
     })).filter(item => item.funder || item.awardId);
+    const documentType = firstNonEmptyString(
+        getNestedValue(record, 'static_data.summary.doctypes.doctype.content', ''),
+        getNestedValue(record, 'static_data.summary.doctypes.doctype', '')
+    );
+    const isConferenceRecord = /conference|proceedings|meeting|symposium|workshop/i.test(String(documentType || ''));
+
     return {
         title,
         authors: normalizedAuthors.authors,
@@ -938,7 +1036,7 @@ const normalizeWosRecord = (record, doi) => {
         source: 'Web of Science',
         sourceType: 'wos',
         wosUid: firstNonEmptyString(record.UID, record.uid),
-        documentType: firstNonEmptyString(getNestedValue(record, 'static_data.summary.doctypes.doctype.content', ''), getNestedValue(record, 'static_data.summary.doctypes.doctype', '')),
+        documentType: documentType,
         abstract,
         keywords: Array.from(new Set(keywords)),
         citationCount: getNestedValue(record, 'dynamic_data.citation_related.tc_list.silo_tc.local_count', null),
@@ -948,10 +1046,10 @@ const normalizeWosRecord = (record, doi) => {
         volume: firstNonEmptyString(pubInfo.vol, pubInfo.volume),
         issue: firstNonEmptyString(pubInfo.issue),
         language: normalizeLanguageCode(firstNonEmptyString(getNestedValue(fullMeta, 'normalized_languages.language', ''), getNestedValue(fullMeta, 'languages.language', ''))),
-        conferenceName: firstNonEmptyString(conferenceInfo.conference_title, conferenceInfo.conference_name),
-        conferenceTitle: firstNonEmptyString(conferenceInfo.conference_title, conferenceInfo.conference_name),
-        conferenceLocation: firstNonEmptyString(conferenceInfo.conference_location, conferenceInfo.conference_city, conferenceInfo.conference_country),
-        conferenceEventDate: firstNonEmptyString(conferenceInfo.conference_dates, conferenceInfo.conference_date),
+        conferenceName: isConferenceRecord ? firstNonEmptyString(conferenceInfo.conference_title, conferenceInfo.conference_name) : '',
+        conferenceTitle: isConferenceRecord ? firstNonEmptyString(conferenceInfo.conference_title, conferenceInfo.conference_name) : '',
+        conferenceLocation: isConferenceRecord ? firstNonEmptyString(conferenceInfo.conference_location, conferenceInfo.conference_city, conferenceInfo.conference_country) : '',
+        conferenceEventDate: isConferenceRecord ? firstNonEmptyString(conferenceInfo.conference_dates, conferenceInfo.conference_date) : '',
         ...publicationParts,
         ...pageInfo
     };
@@ -961,13 +1059,22 @@ async function getWosPaperByDoi(doi) {
     const d = normalizeDoi(doi);
     if (!d) throw new Error('DOI 为空');
     const cached = readPersistentWosCache(d);
-    if (cached) return cached;
+    if (cached) {
+        console.groupCollapsed(`[WoS] DOI ${d}（缓存）`);
+        console.log('归一化结果:', cached);
+        console.groupEnd();
+        return cached;
+    }
     const url = `${APIS.WOS.SEARCH}?databaseId=WOS&count=1&firstRecord=1&usrQuery=${encodeURIComponent(`DO=${d}`)}`;
     const data = await fetchWithRetry(url, 'WOS', 2, 1500);
     const records = collectNestedArray(data, ['Data.Records.records.REC', 'Data.records.REC', 'records.REC', 'Records.records.REC']);
     const record = records[0] || null;
     if (!record) throw new Error('WoS 未找到该 DOI');
     const paper = normalizeWosRecord(record, d);
+    console.groupCollapsed(`[WoS] DOI ${d}`);
+    console.log('原始记录:', record);
+    console.log('归一化结果:', paper);
+    console.groupEnd();
     writePersistentWosCache(d, paper);
     return paper;
 }

@@ -897,11 +897,68 @@ ${JSON.stringify(fieldInfo, null, 2)}
         };
     }
 
+    _stringifyCacheValue(value) {
+        if (value == null) return '';
+        if (typeof value === 'string') return value.trim();
+        if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+        if (Array.isArray(value)) {
+            return value
+                .map(item => this._stringifyCacheValue(item))
+                .filter(Boolean)
+                .join('；');
+        }
+        if (typeof value === 'object') {
+            const direct = [
+                value.text,
+                value.content,
+                value.value,
+                value.label,
+                value.name,
+                value.display_name,
+                value.full_name
+            ].map(item => String(item || '').trim()).find(Boolean);
+            if (direct) return direct;
+            return '';
+        }
+        return String(value).trim();
+    }
+
+    _isConferenceField(field) {
+        const text = `${field.label || ''} ${field.name || ''} ${field.placeholder || ''} ${field.description || ''}`.toLowerCase();
+        return ['会议名称', '会议地点', '会议地址', '会议日期', '会议开始', '会议结束', '组织者', '主办', '承办', 'conference', 'event', 'location', 'organizer', 'chair']
+            .some(token => text.includes(token.toLowerCase()));
+    }
+
+    _isPresentationTypeField(field) {
+        const text = `${field.label || ''} ${field.name || ''} ${field.placeholder || ''} ${field.description || ''}`.toLowerCase();
+        return ['论文类别', '报告类别', '展示类别', 'presentation', 'report type', 'poster', 'oral']
+            .some(token => text.includes(token.toLowerCase()));
+    }
+
+    _shouldDeferField(field) {
+        const paperType = String(this.selectedPaper?.paperType || '').trim();
+        if (paperType !== '会议论文' && this._isConferenceField(field)) {
+            return '当前成果不是会议论文，会议相关字段不做自动推断';
+        }
+        if (this._isPresentationTypeField(field)) {
+            return '报告或展示类别依赖页面真实选项，保留人工确认';
+        }
+        return '';
+    }
+
     async _aiFillField(field, formStructure, group, context = null) {
+        const deferReason = this._shouldDeferField(field);
+        if (deferReason) {
+            return { success: false, message: deferReason };
+        }
         // 1. 检查缓存
         const cached = this._getCachedAnswer(field);
         if (cached) {
             return { success: true, answer: cached, fromCache: true, type: 'finish' };
+        }
+        const fuzzyCached = this._fuzzyMatchCache(field.label || field.name);
+        if (fuzzyCached) {
+            return { success: true, answer: fuzzyCached, fromCache: true, type: 'finish' };
         }
 
         // 2. 构建问题描述
@@ -986,13 +1043,16 @@ ${JSON.stringify(fieldInfo, null, 2)}
 
     _getCachedAnswer(field) {
         const key = field.name || field.label;
-        return this.discoveryCache && this.discoveryCache[key] ? this.discoveryCache[key] : null;
+        const value = this.discoveryCache && this.discoveryCache[key] ? this.discoveryCache[key] : null;
+        const normalized = this._stringifyCacheValue(value);
+        return normalized || null;
     }
 
     _cacheAnswer(field, value) {
         const key = field.name || field.label;
-        if (value && !this.discoveryCache[key]) {
-            this.discoveryCache[key] = value;
+        const normalized = this._stringifyCacheValue(value);
+        if (normalized && !this.discoveryCache[key]) {
+            this.discoveryCache[key] = normalized;
         }
     }
 
@@ -1016,6 +1076,30 @@ ${JSON.stringify(fieldInfo, null, 2)}
             const normalizedKey = key.toLowerCase();
             if (normalizedLabel.includes(normalizedKey) || normalizedKey.includes(normalizedLabel)) {
                 return value;
+            }
+        }
+        return null;
+    }
+
+    _fuzzyMatchCache(label) {
+        if (!this.discoveryCache) return null;
+        const normalizedLabel = String(label || '').toLowerCase();
+
+        if (normalizedLabel.includes('摘要') || normalizedLabel.includes('abstract')) {
+            const abstractKey = Object.keys(this.discoveryCache).find(k => k.includes('_abstract_for_'));
+            if (abstractKey) return this._stringifyCacheValue(this.discoveryCache[abstractKey]) || null;
+        }
+        if (normalizedLabel.includes('关键词') || normalizedLabel.includes('keyword')) {
+            const keywordsKey = Object.keys(this.discoveryCache).find(k => k.includes('_keywords_for_'));
+            if (keywordsKey) return this._stringifyCacheValue(this.discoveryCache[keywordsKey]) || null;
+        }
+
+        for (const [key, value] of Object.entries(this.discoveryCache)) {
+            if (!key || key.startsWith('_')) continue;
+            const normalizedKey = key.toLowerCase();
+            if (normalizedLabel.includes(normalizedKey) || normalizedKey.includes(normalizedLabel)) {
+                const text = this._stringifyCacheValue(value);
+                if (text) return text;
             }
         }
         return null;

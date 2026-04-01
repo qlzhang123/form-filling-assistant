@@ -1,468 +1,410 @@
-class WholeFormPlanner {
-    constructor(llmClient = null) {
-        this.llmClient = llmClient;
-        this.autoFillThreshold = 0.85;
-        this.slotRules = [
-            { slot: 'title', patterns: ['论文标题', '成果标题', '题目', 'title'] },
-            { slot: 'doi', patterns: ['doi'] },
-            { slot: 'authors', patterns: ['作者', 'author'] },
-            { slot: 'authorAffiliations', patterns: ['作者机构', '工作单位', 'affiliation', '单位', '机构'] },
-            { slot: 'year', patterns: ['年份', '年度', 'year'] },
-            { slot: 'venue', patterns: ['期刊', '刊物', '会议', 'venue', 'journal', 'conference', '发表刊物', '成果来源'] },
-            { slot: 'venueShort', patterns: ['会议简称', '刊物简称', '简称', 'acronym'] },
-            { slot: 'abstract', patterns: ['摘要', 'abstract'] },
-            { slot: 'summary', patterns: ['简介', '摘要精简', '内容概述', '成果简介', 'summary', 'description'] },
-            { slot: 'keywords', patterns: ['关键词', '关键字', 'keyword'] },
-            { slot: 'citationCount', patterns: ['引用', 'citation'] },
-            { slot: 'language', patterns: ['语言', 'language'] },
-            { slot: 'paperType', patterns: ['成果类型', '论文类别', '成果类别', '标签', 'type', 'category'] },
-            { slot: 'url', patterns: ['链接', '网址', 'url', 'link'] },
-            { slot: 'firstPage', patterns: ['起始页', '首页', 'first page', 'start page'] },
-            { slot: 'lastPage', patterns: ['终止页', '末页', 'last page', 'end page'] },
-            { slot: 'pageRange', patterns: ['页码范围', '页码', 'pages', 'page range'] },
-            { slot: 'publicationDate', patterns: ['发表日期', '出版日期', 'publication date', 'publish date'] },
-            { slot: 'publicationMonth', patterns: ['发表月份', '出版月份', 'publication month'] },
-            { slot: 'publicationDay', patterns: ['发表日', '出版日', 'publication day'] },
-            { slot: 'conferenceName', patterns: ['会议名称', 'conference name'] },
-            { slot: 'conferenceLocation', patterns: ['会议地点', 'location', '地址'] },
-            { slot: 'conferenceStartDate', patterns: ['会议开始日期', '开始日期', 'start date'] },
-            { slot: 'conferenceEndDate', patterns: ['会议结束日期', '结束日期', 'end date'] },
-            { slot: 'volume', patterns: ['卷号', 'volume'] },
-            { slot: 'issue', patterns: ['期号', 'issue'] },
-            { slot: 'volumeIssue', patterns: ['卷/期', '卷期'] },
-            { slot: 'articleNumber', patterns: ['文章号', '文章编号', 'article number'] }
-        ];
-        this.valueLexicon = {
-            '会议论文': ['conference', 'conferencepaper', 'proceedings', 'inproceedings'],
-            '期刊论文': ['journal', 'journalarticle', 'article'],
-            '特邀报告': ['invited', 'invitedtalk'],
-            '分组报告': ['oral', 'talk', 'sessiontalk'],
-            '墙报展示': ['poster'],
-            '学位论文': ['thesis', 'phdthesis', 'mastersthesis'],
-            '技术报告': ['technicalreport', 'techreport'],
-            '数据集': ['dataset'],
-            '专利': ['patent'],
-            '著作章节': ['bookchapter', 'chapter'],
-            '预印本': ['preprint', 'arxiv'],
-            '中文': ['zh', 'chinese'],
-            '英文': ['en', 'english', '外文'],
-            '开放获取': ['openaccess', 'oa'],
-            '非开放获取': ['closedaccess', 'nonopenaccess'],
-            '是': ['yes', 'true'],
-            '否': ['no', 'false']
-        };
-    }
+﻿import { FIELD_ONTOLOGY } from './field_ontology.js';
+import { FIELD_ALIASES } from './field_aliases.js';
+import { CANDIDATE_SOURCE_MAP } from './candidate_sources.js';
+import { flattenTextValue, normalizeSemanticText, splitList, coerceDateParts, validateValueByType } from './validators.js';
 
-    normalizeText(value) {
-        return String(value || '')
-            .toLowerCase()
-            .replace(/[（）()\[\]{}:：,，;；"'“”‘’`~!@#$%^&*+=<>?/\\|_-]/g, ' ')
-            .replace(/\s+/g, '')
-            .trim();
-    }
-
-    canonicalizeValue(value) {
-        const normalized = this.normalizeText(value);
-        if (!normalized) return '';
-        for (const [canonical, aliases] of Object.entries(this.valueLexicon)) {
-            const normalizedAliases = [canonical, ...aliases].map(v => this.normalizeText(v));
-            if (normalizedAliases.includes(normalized)) return canonical;
-        }
-        return String(value || '').trim();
-    }
-
-    buildFacts(paper, filledContext = {}) {
-        const authors = Array.isArray(paper.authors) ? paper.authors : [];
-        const authorAffiliations = Array.isArray(paper.authorAffiliations) ? paper.authorAffiliations : [];
-        const keywords = Array.isArray(paper.keywords) ? paper.keywords : (paper.keywords ? String(paper.keywords).split(/[;,，；]/).map(s => s.trim()).filter(Boolean) : []);
-        const type = this.inferPaperType(paper);
-        const language = this.inferLanguage(paper);
-        const openAccess = paper.openAccessPdf || paper.isOpenAccess ? '开放获取' : '';
-        const volumeIssue = [paper.volume || '', paper.issue ? `(${paper.issue})` : ''].join('').trim();
-        return {
-            title: paper.title || '',
-            doi: paper.doi || '',
-            authors,
-            authorsText: authors.join(', '),
-            authorAffiliations,
-            authorAffiliationsText: authorAffiliations.join('; '),
-            year: paper.year || '',
-            venue: paper.venueFormatted || paper.venue || '',
-            venueRaw: paper.venueRaw || paper.venue || '',
-            venueShort: paper.venueShort || '',
-            abstract: paper.abstract || '',
-            keywords,
-            keywordsText: keywords.join('; '),
-            citationCount: paper.citationCount != null ? String(paper.citationCount) : '',
-            language,
-            paperType: type,
-            url: paper.url || '',
-            firstPage: paper.firstPage || '',
-            lastPage: paper.lastPage || '',
-            pageRange: paper.pageRange || '',
-            publicationDate: paper.publicationDate || '',
-            publicationMonth: paper.publicationMonth || '',
-            publicationDay: paper.publicationDay || '',
-            conferenceName: paper.conferenceName || paper.conferenceTitle || '',
-            conferenceLocation: paper.conferenceLocation || '',
-            conferenceStartDate: paper.conferenceStartDate || '',
-            conferenceEndDate: paper.conferenceEndDate || '',
-            volume: paper.volume || '',
-            issue: paper.issue || '',
-            volumeIssue,
-            articleNumber: paper.articleNumber || '',
-            openAccess,
-            source: paper.source || '',
-            documentType: paper.documentType || '',
-            extraContext: Object.fromEntries(Object.entries(filledContext || {}).map(([k, v]) => [k, v?.answer || '']))
-        };
-    }
-
-    inferPaperType(paper) {
-        const sourceType = this.normalizeText(paper.documentType || paper.type || '');
-        const venue = this.normalizeText(paper.venueRaw || paper.venue || paper.conferenceName || '');
-        const matchFromLexicon = (canonical) => {
-            const aliases = this.valueLexicon[canonical] || [];
-            return [canonical, ...aliases].some(item => {
-                const key = this.normalizeText(item);
-                return sourceType.includes(key) || venue.includes(key);
-            });
-        };
-        if (matchFromLexicon('期刊论文')) return '期刊论文';
-        if (matchFromLexicon('会议论文')) return '会议论文';
-        if (matchFromLexicon('学位论文')) return '学位论文';
-        if (matchFromLexicon('技术报告')) return '技术报告';
-        if (matchFromLexicon('数据集')) return '数据集';
-        if (matchFromLexicon('专利')) return '专利';
-        if (matchFromLexicon('著作章节')) return '著作章节';
-        if (matchFromLexicon('预印本')) return '预印本';
-        return '';
-    }
-
-    inferLanguage(paper) {
-        const code = this.normalizeText(paper.language || '');
-        if (['zh', 'chinese', '中文'].includes(code)) return '中文';
-        if (['en', 'english', '英文', '外文'].includes(code)) return '英文';
-        const title = String(paper.title || '').trim();
-        if (/[\u4e00-\u9fa5]/.test(title)) return '中文';
-        if (title) return '英文';
-        return '';
-    }
-
-    normalizeFieldIntent(field) {
-        const rawText = [field.label, field.name, field.placeholder, field.description].filter(Boolean).join(' ');
-        const normalized = this.normalizeText(rawText);
-        let slot = 'unknown';
-        let bestScore = -1;
-        for (const rule of this.slotRules) {
-            const score = rule.patterns.reduce((sum, pattern) => {
-                const token = this.normalizeText(pattern);
-                return sum + (normalized.includes(token) ? token.length : 0);
-            }, 0);
-            if (score > bestScore) {
-                bestScore = score;
-                slot = rule.slot;
-            }
-        }
-        return {
-            field,
-            slot: bestScore > 0 ? slot : 'unknown',
-            text: rawText,
-            normalizedText: normalized,
-            hasOptions: Array.isArray(field.options) && field.options.length > 0,
-            isChoice: ['select', 'radio', 'checkbox'].includes(String(field.type || '').toLowerCase()),
-            isLongText: ['textarea'].includes(String(field.type || '').toLowerCase()) || normalized.includes(this.normalizeText('简介')) || normalized.includes(this.normalizeText('摘要')),
-            isTableField: Boolean(field.isTableField)
-        };
-    }
-
-    makeDirectValue(intent, facts) {
-        const bySlot = {
-            title: { value: facts.title, keys: ['title'], confidence: 0.99 },
-            doi: { value: facts.doi, keys: ['doi'], confidence: 0.99 },
-            authors: { value: facts.authorsText, keys: ['authors'], confidence: 0.96 },
-            authorAffiliations: { value: facts.authorAffiliationsText, keys: ['authorAffiliations'], confidence: 0.9 },
-            year: { value: facts.year, keys: ['year'], confidence: 0.99 },
-            venue: { value: facts.venue, keys: ['venue'], confidence: 0.95 },
-            venueShort: { value: facts.venueShort, keys: ['venueShort'], confidence: 0.95 },
-            abstract: { value: facts.abstract, keys: ['abstract'], confidence: 0.96 },
-            keywords: { value: facts.keywordsText, keys: ['keywords'], confidence: 0.94 },
-            citationCount: { value: facts.citationCount, keys: ['citationCount'], confidence: 0.95 },
-            language: { value: facts.language, keys: ['language'], confidence: 0.92 },
-            paperType: { value: facts.paperType, keys: ['paperType', 'documentType', 'venueRaw'], confidence: facts.paperType ? 0.9 : 0 },
-            url: { value: facts.url, keys: ['url'], confidence: 0.98 },
-            firstPage: { value: facts.firstPage, keys: ['firstPage'], confidence: 0.95 },
-            lastPage: { value: facts.lastPage, keys: ['lastPage'], confidence: 0.95 },
-            pageRange: { value: facts.pageRange, keys: ['pageRange'], confidence: 0.95 },
-            publicationDate: { value: facts.publicationDate, keys: ['publicationDate'], confidence: 0.95 },
-            publicationMonth: { value: facts.publicationMonth, keys: ['publicationMonth'], confidence: 0.95 },
-            publicationDay: { value: facts.publicationDay, keys: ['publicationDay'], confidence: 0.95 },
-            conferenceName: { value: facts.conferenceName || facts.venueRaw, keys: ['conferenceName', 'venueRaw'], confidence: facts.conferenceName ? 0.94 : 0.75 },
-            conferenceLocation: { value: facts.conferenceLocation, keys: ['conferenceLocation'], confidence: 0.9 },
-            conferenceStartDate: { value: facts.conferenceStartDate, keys: ['conferenceStartDate'], confidence: 0.92 },
-            conferenceEndDate: { value: facts.conferenceEndDate, keys: ['conferenceEndDate'], confidence: 0.92 },
-            volume: { value: facts.volume, keys: ['volume'], confidence: 0.93 },
-            issue: { value: facts.issue, keys: ['issue'], confidence: 0.93 },
-            volumeIssue: { value: facts.volumeIssue, keys: ['volume', 'issue'], confidence: 0.93 },
-            articleNumber: { value: facts.articleNumber, keys: ['articleNumber'], confidence: 0.9 }
-        };
-        if (intent.slot === 'summary') {
-            const summary = facts.abstract ? String(facts.abstract).replace(/\s+/g, ' ').trim().slice(0, 180) : '';
-            return { value: summary, keys: ['abstract'], confidence: summary ? 0.72 : 0 };
-        }
-        return bySlot[intent.slot] || { value: '', keys: [], confidence: 0 };
-    }
-
-    matchOption(options, rawCandidate, fieldType = 'select') {
-        if (!rawCandidate) return null;
-        const optionList = Array.isArray(options) ? options : [];
-        const candidates = Array.isArray(rawCandidate) ? rawCandidate : [rawCandidate];
-        const normalizedCandidates = candidates
-            .map(value => [String(value).trim(), this.canonicalizeValue(value)])
-            .flat()
-            .filter(Boolean);
-
-        const scoreOption = (option, candidate) => {
-            const optionText = this.normalizeText(option.text || option.value || '');
-            const optionValue = this.normalizeText(option.value || '');
-            const target = this.normalizeText(candidate);
-            if (!target) return 0;
-            if (optionText === target || optionValue === target) return 200;
-            if (optionText.includes(target) || target.includes(optionText)) return 120;
-            if (optionValue && (optionValue.includes(target) || target.includes(optionValue))) return 110;
-            return 0;
-        };
-
-        if (String(fieldType).toLowerCase() === 'checkbox') {
-            const matched = [];
-            for (const candidate of normalizedCandidates) {
-                const best = optionList
-                    .map(option => ({ option, score: scoreOption(option, candidate) }))
-                    .filter(item => item.score > 0)
-                    .sort((a, b) => b.score - a.score)[0];
-                if (best && !matched.find(item => item.value === (best.option.value || best.option.text))) {
-                    matched.push({
-                        value: best.option.value || best.option.text,
-                        text: best.option.text || best.option.value
-                    });
-                }
-            }
-            if (!matched.length) return null;
-            return {
-                fillValue: matched.map(item => item.value),
-                answerText: matched.map(item => item.text).join('；'),
-                confidence: matched.length === normalizedCandidates.length ? 0.9 : 0.72
-            };
-        }
-
-        let bestMatch = null;
-        for (const candidate of normalizedCandidates) {
-            const current = optionList
-                .map(option => ({ option, score: scoreOption(option, candidate) }))
-                .filter(item => item.score > 0)
-                .sort((a, b) => b.score - a.score)[0];
-            if (current && (!bestMatch || current.score > bestMatch.score)) {
-                bestMatch = current;
-            }
-        }
-        if (!bestMatch) return null;
-        return {
-            fillValue: bestMatch.option.value || bestMatch.option.text,
-            answerText: bestMatch.option.text || bestMatch.option.value,
-            confidence: bestMatch.score >= 200 ? 0.96 : 0.82
-        };
-    }
-
-    buildRulePlanItem(intent, facts) {
-        const field = intent.field;
-        if (intent.isTableField) {
-            return {
-                fieldName: field.name,
-                fieldLabel: field.label || field.name,
-                proposedValue: '',
-                fillValue: '',
-                sourceFactKeys: [],
-                confidence: 0,
-                reason: '表格字段留给原有表格流程处理',
-                needsApi: false,
-                needsHuman: false,
-                deferred: true
-            };
-        }
-
-        const direct = this.makeDirectValue(intent, facts);
-        if (!direct.value) {
-            return {
-                fieldName: field.name,
-                fieldLabel: field.label || field.name,
-                proposedValue: '',
-                fillValue: '',
-                sourceFactKeys: [],
-                confidence: 0,
-                reason: '规则层未找到直接可用事实',
-                needsApi: intent.slot !== 'unknown',
-                needsHuman: false,
-                deferred: true
-            };
-        }
-
-        if (intent.isChoice && intent.hasOptions) {
-            const matched = this.matchOption(field.options, direct.value, field.type);
-            if (!matched) {
-                return {
-                    fieldName: field.name,
-                    fieldLabel: field.label || field.name,
-                    proposedValue: '',
-                    fillValue: '',
-                    sourceFactKeys: direct.keys,
-                    confidence: 0,
-                    reason: '规则层找到了事实，但没有命中真实选项',
-                    needsApi: false,
-                    needsHuman: true,
-                    deferred: true
-                };
-            }
-            return {
-                fieldName: field.name,
-                fieldLabel: field.label || field.name,
-                proposedValue: matched.answerText,
-                fillValue: matched.fillValue,
-                sourceFactKeys: direct.keys,
-                confidence: Math.min(0.98, Math.max(direct.confidence, matched.confidence)),
-                reason: '规则层直接命中真实选项',
-                needsApi: false,
-                needsHuman: false,
-                deferred: false
-            };
-        }
-
-        return {
-            fieldName: field.name,
-            fieldLabel: field.label || field.name,
-            proposedValue: direct.value,
-            fillValue: direct.value,
-            sourceFactKeys: direct.keys,
-            confidence: direct.confidence,
-            reason: '规则层直接映射',
-            needsApi: false,
-            needsHuman: false,
-            deferred: false
-        };
-    }
-
-    shouldAskLLM(intent, planItem) {
-        if (!this.llmClient) return false;
-        if (intent.isTableField) return false;
-        if (!planItem.deferred) return false;
-        if (intent.isChoice && !intent.hasOptions) return false;
-        return intent.slot !== 'unknown' || intent.isLongText || intent.hasOptions;
-    }
-
-    async resolveWithLLM(facts, intents, existingPlan) {
-        if (!this.llmClient || !intents.length) return [];
-        const fields = intents.map(intent => ({
-            fieldName: intent.field.name,
-            fieldLabel: intent.field.label || intent.field.name,
-            fieldType: intent.field.type || 'text',
-            slotGuess: intent.slot,
-            options: Array.isArray(intent.field.options) ? intent.field.options.map(opt => ({
-                text: opt.text || opt.value || '',
-                value: opt.value || opt.text || ''
-            })) : []
-        }));
-        const factKeys = Object.keys(facts).filter(key => key !== 'extraContext');
-        const prompt = `你是一个整表映射规划器。你的任务不是直接操作表单，而是根据给定论文事实，为下列表单字段生成候选值计划。
-
-可用事实键：
-${JSON.stringify(factKeys, null, 2)}
-
-论文事实：
-${JSON.stringify(facts, null, 2)}
-
-待决策字段：
-${JSON.stringify(fields, null, 2)}
-
-要求：
-1. 只能使用上面提供的事实，禁止编造新事实。
-2. 如果字段是 select/radio/checkbox，proposedValue 必须来自该字段真实 options。
-3. 每条决策都必须给出 sourceFactKeys。
-4. confidence 取 0 到 1 之间的小数。
-5. 如果无法可靠判断，needsHuman 设为 true，proposedValue 设为空字符串。
-6. 只输出 JSON 数组，不要输出额外说明。
-
-输出格式：
-[
-  {
-    "fieldName": "xxx",
-    "proposedValue": "xxx",
-    "sourceFactKeys": ["title"],
-    "confidence": 0.9,
-    "reason": "xxx",
-    "needsApi": false,
-    "needsHuman": false
-  }
-]`;
-        try {
-            const raw = await this.llmClient.think([{ role: 'user', content: prompt }], 0);
-            const parsed = JSON.parse(String(raw || '').trim().replace(/```json\n?|```/g, ''));
-            if (!Array.isArray(parsed)) return [];
-            return parsed.map(item => {
-                const field = intents.find(intent => intent.field.name === item.fieldName)?.field;
-                if (!field) return null;
-                const base = {
-                    fieldName: field.name,
-                    fieldLabel: field.label || field.name,
-                    proposedValue: String(item.proposedValue || '').trim(),
-                    fillValue: String(item.proposedValue || '').trim(),
-                    sourceFactKeys: Array.isArray(item.sourceFactKeys) ? item.sourceFactKeys : [],
-                    confidence: Number(item.confidence) || 0,
-                    reason: String(item.reason || 'LLM 规划'),
-                    needsApi: Boolean(item.needsApi),
-                    needsHuman: Boolean(item.needsHuman),
-                    deferred: Boolean(item.needsHuman) || !String(item.proposedValue || '').trim()
-                };
-                if (['select', 'radio', 'checkbox'].includes(String(field.type || '').toLowerCase()) && Array.isArray(field.options) && field.options.length) {
-                    const matched = this.matchOption(field.options, base.proposedValue, field.type);
-                    if (!matched) {
-                        return { ...base, proposedValue: '', fillValue: '', confidence: 0, needsHuman: true, deferred: true, reason: 'LLM 提议未命中真实选项' };
-                    }
-                    return { ...base, proposedValue: matched.answerText, fillValue: matched.fillValue, confidence: Math.max(base.confidence, matched.confidence), deferred: false };
-                }
-                return base;
-            }).filter(Boolean);
-        } catch (error) {
-            console.warn('WholeFormPlanner LLM 规划失败:', error);
-            return [];
-        }
-    }
-
-    mergePlans(rulePlans, llmPlans) {
-        const merged = new Map(rulePlans.map(item => [item.fieldName, item]));
-        for (const item of llmPlans) {
-            const current = merged.get(item.fieldName);
-            if (!current || (current.deferred && item.confidence > current.confidence)) {
-                merged.set(item.fieldName, item);
-            }
-        }
-        return Array.from(merged.values());
-    }
-
-    async createPlan({ paper, filledContext = {}, fields = [] }) {
-        const facts = this.buildFacts(paper, filledContext);
-        const intents = fields.map(field => this.normalizeFieldIntent(field));
-        const rulePlans = intents.map(intent => this.buildRulePlanItem(intent, facts));
-        const unresolvedIntents = intents.filter(intent => {
-            const plan = rulePlans.find(item => item.fieldName === intent.field.name);
-            return this.shouldAskLLM(intent, plan);
-        });
-        const llmPlans = await this.resolveWithLLM(facts, unresolvedIntents, rulePlans);
-        const merged = this.mergePlans(rulePlans, llmPlans);
-        return {
-            facts,
-            plans: merged,
-            autoFillThreshold: this.autoFillThreshold
-        };
+class DateResolver {
+    buildDateView(rawValue, fallbackYear = '') {
+        const parts = coerceDateParts(rawValue);
+        if (!parts.year && fallbackYear) return { ...parts, year: String(fallbackYear).trim() };
+        return parts;
     }
 }
 
-export { WholeFormPlanner };
+class FactNormalizer {
+    constructor() { this.dateResolver = new DateResolver(); }
+    createRecord(path, value, semanticType, source = 'paper', confidence = 0.9, completeness = 1) {
+        return { path, value, semanticType, source, confidence, completeness };
+    }
+    normalizeLanguage(value, title = '') {
+        const raw = normalizeSemanticText(value);
+        if (['zh', 'chinese', '中文'].includes(raw)) return '中文';
+        if (['en', 'english', '英文', '外文'].includes(raw)) return '英文';
+        if (/[\u4e00-\u9fa5]/.test(String(title || ''))) return '中文';
+        if (title) return '英文';
+        return '';
+    }
+    inferDocumentType(paper) {
+        const rawHints = [paper?.paperType, paper?.documentType, paper?.type, paper?.sourceType].map(item => normalizeSemanticText(item)).filter(Boolean).join(' ');
+        const venue = normalizeSemanticText(paper?.venueRaw || paper?.venue || '');
+        if (rawHints.includes(normalizeSemanticText('期刊论文')) || /(article|journal)/.test(rawHints)) return '期刊论文';
+        if (rawHints.includes(normalizeSemanticText('会议论文')) || /(conference|proceedings|inproceedings|meeting|symposium|workshop)/.test(rawHints)) return '会议论文';
+        if (rawHints.includes(normalizeSemanticText('学位论文')) || /thesis/.test(rawHints)) return '学位论文';
+        if (rawHints.includes(normalizeSemanticText('专利')) || /patent/.test(rawHints)) return '专利';
+        if (rawHints.includes(normalizeSemanticText('数据集')) || /dataset/.test(rawHints)) return '数据集';
+        if (rawHints.includes(normalizeSemanticText('预印本')) || /(preprint|arxiv)/.test(rawHints)) return '预印本';
+        if (/(journal|transactions|letters|review|management|science)/.test(venue)) return '期刊论文';
+        if (/(conference|symposium|workshop|proceedings)/.test(venue)) return '会议论文';
+        return '';
+    }
+    flattenFunding(value) {
+        if (!value) return '';
+        const items = Array.isArray(value) ? value : [value];
+        return items.map(item => {
+            if (!item) return '';
+            if (typeof item === 'string') return item.trim();
+            if (typeof item !== 'object') return String(item).trim();
+            return [flattenTextValue(item.funder), flattenTextValue(item.agency), flattenTextValue(item.awardId), flattenTextValue(item.award_id), flattenTextValue(item.grantId), flattenTextValue(item.grant_id)].filter(Boolean).join(' / ');
+        }).filter(Boolean).join('；');
+    }
+    normalize({ paper, filledContext = {}, discoveryCache = {} }) {
+        const base = paper || {};
+        const authors = splitList(base.authors);
+        const authorAffiliations = splitList(base.authorAffiliations);
+        const organizers = splitList(base.organizers);
+        const keywords = splitList(base.keywords);
+        const publicationDate = this.dateResolver.buildDateView(base.publicationDate, base.year || '');
+        const conferenceEventDate = this.dateResolver.buildDateView(base.conferenceEventDate, base.year || '');
+        const conferenceStart = this.dateResolver.buildDateView(base.conferenceStartDate, base.year || '');
+        const conferenceEnd = this.dateResolver.buildDateView(base.conferenceEndDate, base.year || '');
+        const paperType = this.inferDocumentType(base);
+        const isConferencePaper = paperType === '会议论文';
+        const fundingText = this.flattenFunding(base.funding || base.grants);
+        const indexing = splitList(base.indexing || base.indexings || base.indexedBy);
+        const notesText = flattenTextValue(base.notes || base.note);
+        const facts = {
+            paper: {
+                title: flattenTextValue(base.title), doi: flattenTextValue(base.doi), abstract: flattenTextValue(base.abstract), keywords,
+                keywordsText: keywords.join('；'), citationCount: base.citationCount != null ? String(base.citationCount).trim() : '',
+                url: flattenTextValue(base.url), language: this.normalizeLanguage(base.language, base.title), type: paperType,
+                presentationType: flattenTextValue(base.presentationType), fundingText
+            },
+            publication: {
+                venue: flattenTextValue(base.venueFormatted || base.venue), venueRaw: flattenTextValue(base.venueRaw || base.venue), venueShort: flattenTextValue(base.venueShort),
+                date: publicationDate,
+                pages: { first: flattenTextValue(base.firstPage), last: flattenTextValue(base.lastPage), range: flattenTextValue(base.pageRange) },
+                volume: flattenTextValue(base.volume), issue: flattenTextValue(base.issue),
+                volumeIssue: [flattenTextValue(base.volume), base.issue ? `(${flattenTextValue(base.issue)})` : ''].join('').trim(),
+                articleNumber: flattenTextValue(base.articleNumber), indexing, indexingText: indexing.join('；')
+            },
+            conference: {
+                name: isConferencePaper ? flattenTextValue(base.conferenceName || base.conferenceTitle) : '',
+                shortName: isConferencePaper ? flattenTextValue(base.venueShort) : '',
+                location: isConferencePaper ? flattenTextValue(base.conferenceLocation) : '',
+                organizers, organizersText: isConferencePaper ? organizers.join('；') : '',
+                eventDate: isConferencePaper ? conferenceEventDate : this.dateResolver.buildDateView('', ''),
+                start: isConferencePaper ? conferenceStart : this.dateResolver.buildDateView('', ''),
+                end: isConferencePaper ? conferenceEnd : this.dateResolver.buildDateView('', '')
+            },
+            authors: { names: authors, namesText: authors.join(', '), affiliations: authorAffiliations, affiliationsText: authorAffiliations.join('；'), entries: authors.map((name, index) => ({ name, affiliation: authorAffiliations[index] || '' })) },
+            narrative: { notesText },
+            extraContext: Object.fromEntries(Object.entries(filledContext || {}).map(([key, value]) => [key, flattenTextValue(value?.answer || '')])),
+            discoveryCache: discoveryCache || {}
+        };
+        const factIndex = [];
+        const push = (path, value, semanticType, source = 'paper', confidence = 0.9, completeness = 1) => {
+            if (value == null) return;
+            if (Array.isArray(value)) { if (!value.length) return; factIndex.push(this.createRecord(path, value, semanticType, source, confidence, completeness)); return; }
+            if (flattenTextValue(value) === '') return;
+            factIndex.push(this.createRecord(path, value, semanticType, source, confidence, completeness));
+        };
+        push('paper.title', facts.paper.title, 'title_text');
+        push('paper.doi', facts.paper.doi, 'identifier');
+        push('paper.abstract', facts.paper.abstract, 'long_text');
+        push('paper.keywords', facts.paper.keywords, 'keyword_list');
+        push('paper.keywordsText', facts.paper.keywordsText, 'keyword_list');
+        push('paper.citationCount', facts.paper.citationCount, 'number');
+        push('paper.url', facts.paper.url, 'url');
+        push('paper.language', facts.paper.language, 'language');
+        push('paper.type', facts.paper.type, 'document_type');
+        push('paper.presentationType', facts.paper.presentationType, 'presentation_type');
+        push('paper.fundingText', facts.paper.fundingText, 'funding_text');
+        push('publication.venue', facts.publication.venue, 'venue_name');
+        push('publication.venueRaw', facts.publication.venueRaw, 'venue_name');
+        push('publication.venueShort', facts.publication.venueShort, 'short_name');
+        push('publication.date.raw', facts.publication.date.raw, 'date');
+        push('publication.date.year', facts.publication.date.year, 'year');
+        push('publication.date.month', facts.publication.date.month, 'month');
+        push('publication.date.day', facts.publication.date.day, 'day');
+        push('publication.pages.first', facts.publication.pages.first, 'page_info');
+        push('publication.pages.last', facts.publication.pages.last, 'page_info');
+        push('publication.pages.range', facts.publication.pages.range, 'page_info');
+        push('publication.volume', facts.publication.volume, 'number_text');
+        push('publication.issue', facts.publication.issue, 'number_text');
+        push('publication.volumeIssue', facts.publication.volumeIssue, 'text');
+        push('publication.articleNumber', facts.publication.articleNumber, 'identifier');
+        push('publication.indexing', facts.publication.indexing, 'indexing_list');
+        push('publication.indexingText', facts.publication.indexingText, 'indexing_list');
+        push('conference.name', facts.conference.name, 'event_name');
+        push('conference.shortName', facts.conference.shortName, 'short_name');
+        push('conference.location', facts.conference.location, 'place');
+        push('conference.organizers', facts.conference.organizers, 'organization_or_person');
+        push('conference.organizersText', facts.conference.organizersText, 'organization_or_person');
+        push('conference.eventDate.raw', facts.conference.eventDate.raw, 'date');
+        push('conference.eventDate.year', facts.conference.eventDate.year, 'year');
+        push('conference.eventDate.month', facts.conference.eventDate.month, 'month');
+        push('conference.eventDate.day', facts.conference.eventDate.day, 'day');
+        push('conference.start.raw', facts.conference.start.raw, 'date');
+        push('conference.start.year', facts.conference.start.year, 'year');
+        push('conference.start.month', facts.conference.start.month, 'month');
+        push('conference.start.day', facts.conference.start.day, 'day');
+        push('conference.end.raw', facts.conference.end.raw, 'date');
+        push('conference.end.year', facts.conference.end.year, 'year');
+        push('conference.end.month', facts.conference.end.month, 'month');
+        push('conference.end.day', facts.conference.end.day, 'day');
+        push('authors.names', facts.authors.names, 'person_list');
+        push('authors.namesText', facts.authors.namesText, 'person_list');
+        push('authors.affiliations', facts.authors.affiliations, 'organization_list');
+        push('authors.affiliationsText', facts.authors.affiliationsText, 'organization_list');
+        push('paper.notesText', facts.narrative.notesText, 'note_text');
+        return { ...facts, factIndex, byPath: Object.fromEntries(factIndex.map(item => [item.path, item])) };
+    }
+}
+
+class FieldSemanticClassifier {
+    constructor() {
+        this.aliases = FIELD_ALIASES;
+        this.sourceWeights = { label: 1, name: 0.72, placeholder: 0.28, description: 0.08 };
+    }
+    buildSemanticTextMap(field) {
+        return { label: normalizeSemanticText(field.label || ''), name: normalizeSemanticText(field.name || ''), placeholder: normalizeSemanticText(field.placeholder || ''), description: normalizeSemanticText(field.description || '') };
+    }
+    scoreAlias(aliasEntry, textMap) {
+        const negatives = (aliasEntry.negatives || []).map(item => normalizeSemanticText(item)).filter(Boolean);
+        for (const negative of negatives) if (Object.values(textMap).some(text => text.includes(negative))) return 0;
+        let score = 0;
+        for (const alias of aliasEntry.aliases || []) {
+            const token = normalizeSemanticText(alias);
+            if (!token) continue;
+            for (const [source, text] of Object.entries(textMap)) if (text && text.includes(token)) score += token.length * (this.sourceWeights[source] || 0.1);
+        }
+        return score * (aliasEntry.weight || 1);
+    }
+    classifyBoundary(matchedAlias, textMap) {
+        if (matchedAlias?.boundary) return matchedAlias.boundary;
+        const allText = `${textMap.label} ${textMap.name} ${textMap.placeholder} ${textMap.description}`;
+        if (allText.includes(normalizeSemanticText('开始')) || allText.includes(normalizeSemanticText('起始')) || allText.includes('start') || allText.includes('from')) return 'start';
+        if (allText.includes(normalizeSemanticText('结束')) || allText.includes(normalizeSemanticText('终止')) || allText.includes('end') || allText.includes('until') || allText.includes('to')) return 'end';
+        return 'single';
+    }
+    classifyComponent(field, matchedAlias, textMap) {
+        if (matchedAlias?.component) return matchedAlias.component;
+        const domain = matchedAlias?.domain || '';
+        const role = matchedAlias?.role || '';
+        const allText = `${textMap.label} ${textMap.name} ${textMap.placeholder} ${textMap.description}`;
+        if (domain === 'publication' && role === 'pages') {
+            if (allText.includes(normalizeSemanticText('起始页码')) || allText.includes(normalizeSemanticText('首页')) || allText.includes('firstpage') || allText.includes('startpage')) return 'first';
+            if (allText.includes(normalizeSemanticText('终止页码')) || allText.includes(normalizeSemanticText('末页')) || allText.includes('lastpage') || allText.includes('endpage')) return 'last';
+            return 'range';
+        }
+        if (role === 'year') return 'year';
+        if (role !== 'date') return 'full';
+        if (allText.includes(normalizeSemanticText('年份')) || allText.includes(normalizeSemanticText('出版年')) || allText.endsWith('year')) return 'year';
+        if (allText.includes(normalizeSemanticText('月份')) || allText.endsWith('month')) return 'month';
+        if (allText.includes(normalizeSemanticText('开始月')) || allText.includes(normalizeSemanticText('结束月'))) return 'month';
+        if (allText.includes(normalizeSemanticText('开始日')) || allText.includes(normalizeSemanticText('结束日')) || allText.endsWith('day')) return 'day';
+        return 'full';
+    }
+    classifyExpectedType(domain, role, component) {
+        const ontologyType = FIELD_ONTOLOGY?.[domain]?.roles?.[role]?.expectedValueType || 'text';
+        if (component === 'year') return 'year';
+        if (component === 'month') return 'month';
+        if (component === 'day') return 'day';
+        return ontologyType;
+    }
+    buildConstraints(field, fieldType, hasOptions, textMap) {
+        const joined = `${textMap.label} ${textMap.name} ${textMap.placeholder} ${textMap.description}`;
+        return {
+            allowOverwrite: false,
+            mustMatchOption: hasOptions,
+            fieldType,
+            requiredFormat: fieldType === 'url' ? 'url' : '',
+            forbiddenKinds: [
+                (joined.includes(normalizeSemanticText('地点')) || joined.includes(normalizeSemanticText('地址'))) ? 'event_name' : '',
+                (joined.includes(normalizeSemanticText('地点')) || joined.includes(normalizeSemanticText('地址'))) ? 'organization_or_person' : '',
+                (joined.includes(normalizeSemanticText('组织者')) || joined.includes(normalizeSemanticText('主办')) || joined.includes(normalizeSemanticText('承办'))) ? 'place' : '',
+                (joined.includes(normalizeSemanticText('组织者')) || joined.includes(normalizeSemanticText('主办')) || joined.includes(normalizeSemanticText('承办'))) ? 'event_name' : ''
+            ].filter(Boolean)
+        };
+    }
+    classify(field) {
+        const textMap = this.buildSemanticTextMap(field);
+        const matchedAlias = this.aliases.map(item => ({ item, score: this.scoreAlias(item, textMap) })).filter(item => item.score > 0).sort((a, b) => b.score - a.score)[0]?.item || null;
+        const domain = matchedAlias?.domain || 'narrative';
+        const role = matchedAlias?.role || 'description';
+        const boundary = this.classifyBoundary(matchedAlias, textMap);
+        const component = this.classifyComponent(field, matchedAlias, textMap);
+        const type = String(field.type || 'text').toLowerCase();
+        const hasOptions = Array.isArray(field.options) && field.options.length > 0;
+        const expectedValueType = this.classifyExpectedType(domain, role, component);
+        let semanticKey = `${domain}.${role}`;
+        if (domain === 'conference' && role === 'date') semanticKey = boundary === 'single' ? `conference.date.${component}` : `conference.date.${boundary}.${component}`;
+        else if (domain === 'publication' && role === 'date') semanticKey = `publication.date.${component}`;
+        else if (domain === 'publication' && role === 'pages') semanticKey = `publication.pages.${component}`;
+        return { field, fieldName: field.name, label: field.label || field.name, type, domain, role, component, boundary, expectedValueType, options: field.options || [], hasOptions, isTableField: Boolean(field.isTableField), repeatedGroupKey: field.repeatedGroupKey || '', rowIndex: typeof field.rowIndex === 'number' ? field.rowIndex : null, constraints: this.buildConstraints(field, type, hasOptions, textMap), semanticKey };
+    }
+}
+
+class LLMRanker {
+    constructor(llmClient = null) { this.llmClient = llmClient; }
+    async rank(intent, candidates) {
+        if (!this.llmClient || !Array.isArray(candidates) || candidates.length < 2) return candidates[0] || null;
+        const prompt = `你是字段候选排序器，只能在已有候选里选择一个最合适的值。\n字段语义：${JSON.stringify({ label: intent.label, domain: intent.domain, role: intent.role, component: intent.component, boundary: intent.boundary, expectedValueType: intent.expectedValueType, fieldType: intent.type, options: intent.options }, null, 2)}\n\n候选列表：\n${JSON.stringify(candidates.map((item, index) => ({ index, path: item.path, value: item.value, semanticType: item.semanticType, score: item.score, source: item.source })), null, 2)}\n\n要求：\n1. 只能从候选列表里选。\n2. 不要编造任何新值。\n3. 只输出 JSON，例如 {"index":0,"confidence":0.91,"reason":"...","needsHuman":false}`;
+        try {
+            const raw = await this.llmClient.think([{ role: 'user', content: prompt }], 0);
+            const parsed = JSON.parse(String(raw || '').trim().replace(/```json\n?|```/g, ''));
+            const picked = candidates[Number(parsed?.index)];
+            if (!picked) return candidates[0] || null;
+            return { ...picked, score: Math.max(picked.score, Number(parsed?.confidence) || picked.score), reason: String(parsed?.reason || picked.reason || 'LLM 排序'), needsHuman: Boolean(parsed?.needsHuman) };
+        } catch (error) {
+            console.warn('LLMRanker 排序失败:', error);
+            return candidates[0] || null;
+        }
+    }
+}
+
+class ConstraintPlanner {
+    constructor(llmClient = null) {
+        this.autoFillThreshold = 0.88;
+        this.llmRanker = new LLMRanker(llmClient);
+        this.choiceLexicon = {
+            中文: ['中文', 'Chinese', 'zh'], 英文: ['英文', 'English', 'en', '外文'], 会议论文: ['会议论文', 'conference paper', 'inproceedings', 'proceedings'],
+            期刊论文: ['期刊论文', 'journal article', 'article', 'journal'], 学位论文: ['学位论文', 'thesis'], 技术报告: ['技术报告', 'technical report', 'tech report'],
+            数据集: ['数据集', 'dataset'], 专利: ['专利', 'patent'], 著作章节: ['著作章节', 'book chapter', 'chapter'], 预印本: ['预印本', 'preprint'],
+            开放获取: ['开放获取', 'open access', 'oa'], 非开放获取: ['非开放获取', 'closed access']
+        };
+    }
+    getCandidatePaths(intent) { return CANDIDATE_SOURCE_MAP[intent.semanticKey] || CANDIDATE_SOURCE_MAP[`${intent.domain}.${intent.role}`] || []; }
+    expandFactRecord(record) {
+        if (Array.isArray(record.value) && record.semanticType === 'indexing_list') return [{ ...record, value: record.value }];
+        if (Array.isArray(record.value)) return record.value.map(value => ({ ...record, value }));
+        return [{ ...record, value: record.value }];
+    }
+    passesSemanticFilter(intent, candidate) {
+        if (!candidate || candidate.value == null) return false;
+        if (intent.constraints.forbiddenKinds.includes(candidate.semanticType)) return false;
+        if (intent.domain === 'conference') {
+            if (!candidate.path.startsWith('conference.')) return false;
+            if (intent.role === 'organizer' && candidate.semanticType !== 'organization_or_person') return false;
+            if (intent.role === 'location' && candidate.semanticType !== 'place') return false;
+            if (intent.role === 'name' && candidate.semanticType !== 'event_name') return false;
+        }
+        if (intent.domain === 'publication' && intent.role === 'venue' && candidate.path.startsWith('conference.')) return false;
+        if (intent.domain === 'publication' && intent.role === 'indexing' && candidate.semanticType !== 'indexing_list') return false;
+        if (intent.domain === 'paper' && intent.role === 'type' && candidate.semanticType !== 'document_type') return false;
+        if (intent.domain === 'paper' && intent.role === 'presentationType' && candidate.semanticType !== 'presentation_type') return false;
+        return validateValueByType(intent.expectedValueType, candidate.value, intent.component);
+    }
+    normalizeChoiceValue(value) {
+        const raw = flattenTextValue(value);
+        const normalized = normalizeSemanticText(raw);
+        for (const [canonical, aliases] of Object.entries(this.choiceLexicon)) {
+            const targets = [canonical, ...aliases].map(item => normalizeSemanticText(item));
+            if (targets.includes(normalized)) return canonical;
+        }
+        return raw;
+    }
+    toChoiceList(value) {
+        if (Array.isArray(value)) return value.map(item => this.normalizeChoiceValue(item)).filter(Boolean);
+        return splitList(value).map(item => this.normalizeChoiceValue(item)).filter(Boolean);
+    }
+    scoreOption(option, candidate) {
+        const optionText = normalizeSemanticText(option.text || option.value || '');
+        const optionValue = normalizeSemanticText(option.value || '');
+        const target = normalizeSemanticText(candidate);
+        if (!target) return 0;
+        if (optionText === target || optionValue === target) return 1;
+        if (optionText && (optionText.includes(target) || target.includes(optionText))) return 0.82;
+        if (optionValue && (optionValue.includes(target) || target.includes(optionValue))) return 0.75;
+        return 0;
+    }
+    resolveOptionWriteValue(intent, option) {
+        if (intent.type === 'checkbox' || intent.type === 'radio') return option.text || option.value || '';
+        const rawValue = String(option.value || '').trim().toLowerCase();
+        if (!rawValue || ['on', 'true', 'false'].includes(rawValue)) return option.text || option.value || '';
+        return option.value || option.text || '';
+    }
+    matchOptions(intent, candidateValue) {
+        const options = Array.isArray(intent.options) ? intent.options : [];
+        if (!intent.hasOptions || !options.length) return null;
+        const values = this.toChoiceList(candidateValue);
+        if (!values.length) return null;
+        if (intent.type === 'checkbox') {
+            const matched = [];
+            for (const value of values) {
+                const best = options.map(option => ({ option, score: this.scoreOption(option, value) })).filter(item => item.score > 0).sort((a, b) => b.score - a.score)[0];
+                if (!best) continue;
+                const writeValue = this.resolveOptionWriteValue(intent, best.option);
+                if (!writeValue) continue;
+                if (!matched.find(item => item.writeValue === writeValue)) matched.push({ writeValue, text: best.option.text || best.option.value || writeValue, score: best.score });
+            }
+            if (!matched.length) return null;
+            return { fillValue: matched.map(item => item.writeValue), proposedValue: matched.map(item => item.text).join('；'), optionScore: matched.reduce((sum, item) => sum + item.score, 0) / matched.length };
+        }
+        const best = values.map(value => options.map(option => ({ option, score: this.scoreOption(option, value) })).filter(item => item.score > 0).sort((a, b) => b.score - a.score)[0]).filter(Boolean).sort((a, b) => b.score - a.score)[0];
+        if (!best) return null;
+        return { fillValue: this.resolveOptionWriteValue(intent, best.option), proposedValue: best.option.text || best.option.value || '', optionScore: best.score };
+    }
+    scoreCandidate(intent, candidate) {
+        let score = 0.48;
+        if (candidate.semanticType === intent.expectedValueType) score += 0.22;
+        if (intent.domain === 'conference' && candidate.path.startsWith('conference.')) score += 0.2;
+        if (intent.domain === 'publication' && candidate.path.startsWith('publication.')) score += 0.2;
+        if (intent.domain === 'paper' && candidate.path.startsWith('paper.')) score += 0.2;
+        if (intent.domain === 'author' && candidate.path.startsWith('authors.')) score += 0.2;
+        score += Math.min(0.05, (candidate.completeness || 0) * 0.05);
+        score += Math.min(0.05, (candidate.confidence || 0) * 0.05);
+        return Math.min(0.99, score);
+    }
+    collectCandidates(intent, facts) {
+        const paths = this.getCandidatePaths(intent);
+        const candidates = [];
+        for (const path of paths) {
+            const record = facts.byPath[path];
+            if (!record) continue;
+            for (const expanded of this.expandFactRecord(record)) {
+                if (!this.passesSemanticFilter(intent, expanded)) continue;
+                candidates.push({ ...expanded, score: this.scoreCandidate(intent, expanded), reason: `候选来自 ${path}` });
+            }
+        }
+        return candidates.sort((a, b) => b.score - a.score);
+    }
+    buildDeferredPlan(intent, reason, needsHuman = false) {
+        return { fieldName: intent.fieldName, fieldLabel: intent.label, proposedValue: '', fillValue: '', sourceFactKeys: [], confidence: 0, reason, needsApi: false, needsHuman, deferred: true, semantics: intent };
+    }
+    async planOne(intent, facts) {
+        if (intent.isTableField) return this.buildDeferredPlan(intent, '表格字段保留给原有表格流程处理');
+        if (intent.domain === 'conference' && facts.paper?.type !== '会议论文') return this.buildDeferredPlan(intent, '当前成果不是会议论文，会议字段不进入快速自动填写');
+        if (intent.domain === 'paper' && intent.role === 'presentationType') return this.buildDeferredPlan(intent, '展示或报告类别需要基于页面选项人工确认', true);
+        if (intent.domain === 'author' && intent.role === 'affiliations' && Array.isArray(facts.authors?.affiliations) && facts.authors.affiliations.length > 1) return this.buildDeferredPlan(intent, '作者单位是多值结构，保留给作者表格或逐字段流程处理', true);
+        const candidates = this.collectCandidates(intent, facts);
+        if (!candidates.length) return this.buildDeferredPlan(intent, '没有找到满足约束的候选事实', true);
+        const topCandidates = candidates.slice(0, 3);
+        const resolvedCandidate = topCandidates.length > 1 && Math.abs(topCandidates[0].score - topCandidates[1].score) < 0.08 ? await this.llmRanker.rank(intent, topCandidates) : topCandidates[0];
+        if (!resolvedCandidate || resolvedCandidate.needsHuman) return this.buildDeferredPlan(intent, resolvedCandidate?.reason || '候选冲突，等待人工确认', true);
+        let fillValue = resolvedCandidate.value;
+        let proposedValue = Array.isArray(fillValue) ? fillValue.map(item => flattenTextValue(item)).filter(Boolean).join('；') : flattenTextValue(fillValue);
+        let confidence = resolvedCandidate.score;
+        if (intent.hasOptions) {
+            const matched = this.matchOptions(intent, fillValue);
+            if (!matched) return this.buildDeferredPlan(intent, '候选值未命中字段真实选项', true);
+            fillValue = matched.fillValue;
+            proposedValue = matched.proposedValue;
+            confidence = Math.max(confidence, matched.optionScore);
+        }
+        return { fieldName: intent.fieldName, fieldLabel: intent.label, proposedValue, fillValue, sourceFactKeys: [resolvedCandidate.path], confidence, reason: resolvedCandidate.reason, needsApi: false, needsHuman: false, deferred: confidence < this.autoFillThreshold, semantics: intent };
+    }
+    async createPlan(intents, facts) {
+        const plans = [];
+        for (const intent of intents) plans.push(await this.planOne(intent, facts));
+        return { facts, plans, autoFillThreshold: this.autoFillThreshold };
+    }
+}
+
+class WholeFormPlanner {
+    constructor(llmClient = null) { this.factNormalizer = new FactNormalizer(); this.fieldClassifier = new FieldSemanticClassifier(); this.constraintPlanner = new ConstraintPlanner(llmClient); }
+    buildTypedFacts({ paper, filledContext = {}, discoveryCache = {} }) { return this.factNormalizer.normalize({ paper, filledContext, discoveryCache }); }
+    classifyFields(fields = []) { return fields.map(field => this.fieldClassifier.classify(field)); }
+    async createPlan({ paper = null, facts = null, filledContext = {}, discoveryCache = {}, fields = [] }) {
+        const typedFacts = facts || this.buildTypedFacts({ paper, filledContext, discoveryCache });
+        const intents = this.classifyFields(fields);
+        return this.constraintPlanner.createPlan(intents, typedFacts);
+    }
+}
+
+function buildTypedFacts(input) {
+    const planner = new WholeFormPlanner(null);
+    return planner.buildTypedFacts(input);
+}
+
+export { WholeFormPlanner, buildTypedFacts, FactNormalizer, FieldSemanticClassifier, ConstraintPlanner, DateResolver };

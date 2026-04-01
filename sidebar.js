@@ -7,7 +7,7 @@ import { FormFillingAgent } from './js/form_agent.js';
 import { EnhancedToolExecutor } from './js/tool_executor.js';
 import { fetchCrawl4AIPageContent } from './js/crawl4ai_client.js';
 import { extractFormFieldsFromHtml } from './js/schema_extractor_adapter.js';
-import { WholeFormPlanner } from './js/whole_form_planner.js';
+import { WholeFormPlanner, buildTypedFacts } from './js/whole_form_planner.js';
 import { unifiedSearchAuthors, unifiedGetPublications, getPaperByDOI,  unifiedSearchPapers, searchConferenceEventDate } from './js/api_client.js';
 import { getSemanticScholarPaperByDoi, getCrossrefPaperByDoi, getOpenAlexPaperByDoi, getWosPaperByDoi } from './js/api_client.js';
 class FormFillingSidebar {
@@ -1241,75 +1241,383 @@ class FormFillingSidebar {
     formatFundingInfo(value) {
         if (!value) return '';
         if (typeof value === 'string') return value;
-        if (!Array.isArray(value)) return JSON.stringify(value);
+        if (!Array.isArray(value)) return this.stringifyPaperValue(value);
         const formatted = value.map(item => {
             if (!item) return '';
             if (typeof item === 'string') return item.trim();
             if (typeof item !== 'object') return String(item).trim();
             const parts = [
-                item.funder,
-                item.agency,
-                item.awardId,
-                item.award_id,
-                item.grantId,
-                item.grant_id
-            ].filter(Boolean).map(v => String(v).trim());
+                this.stringifyPaperValue(item.funder),
+                this.stringifyPaperValue(item.agency),
+                this.stringifyPaperValue(item.awardId),
+                this.stringifyPaperValue(item.award_id),
+                this.stringifyPaperValue(item.grantId),
+                this.stringifyPaperValue(item.grant_id)
+            ].filter(Boolean);
             return parts.join(' / ');
         }).filter(Boolean);
         return formatted.join('; ');
     }
 
+    stringifyPaperValue(value) {
+        if (value == null) return '';
+        if (typeof value === 'string') return value.trim();
+        if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+        if (Array.isArray(value)) {
+            return value
+                .map(item => this.stringifyPaperValue(item))
+                .filter(Boolean)
+                .join('；');
+        }
+        if (typeof value === 'object') {
+            const directKeys = ['content', 'text', 'label', 'title', 'name', 'display_name', 'full_name'];
+            for (const key of directKeys) {
+                if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+                const direct = value[key];
+                if (typeof direct === 'string' || typeof direct === 'number' || typeof direct === 'boolean') {
+                    const text = String(direct).trim();
+                    if (text) return text;
+                }
+            }
+            if (Object.prototype.hasOwnProperty.call(value, 'value')) {
+                const nested = this.stringifyPaperValue(value.value);
+                if (nested) return nested;
+            }
+            return Object.values(value)
+                .map(item => this.stringifyPaperValue(item))
+                .filter(Boolean)
+                .join('；');
+        }
+        return String(value).trim();
+    }
+
+    normalizePaperListValue(value) {
+        if (value == null) return [];
+        const list = Array.isArray(value) ? value : [value];
+        return list
+            .map(item => this.stringifyPaperValue(item))
+            .flatMap(item => String(item || '').split(/[;；\n]+/))
+            .map(item => item.trim())
+            .filter(Boolean);
+    }
+
+    hasMultipleAuthorAffiliations(paper) {
+        return this.normalizePaperListValue(paper?.authorAffiliations).length > 1;
+    }
+
+    normalizeLanguageLabel(value) {
+        const raw = String(value || '').trim().toLowerCase();
+        if (!raw) return '';
+        if (['zh', 'chinese', '中文'].includes(raw)) return '中文';
+        if (['en', 'english', '英文', '外文'].includes(raw)) return '英文';
+        return this.stringifyPaperValue(value);
+    }
+
+    sanitizeDiscoveryData(data) {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
+        const cleaned = {};
+        for (const [key, value] of Object.entries(data)) {
+            if (!key || key.startsWith('_')) continue;
+            if (Array.isArray(value)) {
+                const list = value
+                    .map(item => this.stringifyPaperValue(item))
+                    .filter(Boolean);
+                if (list.length) cleaned[key] = list.length === 1 ? list[0] : list;
+                continue;
+            }
+            if (value && typeof value === 'object') {
+                const flattened = this.stringifyPaperValue(value);
+                if (flattened) cleaned[key] = flattened;
+                continue;
+            }
+            const scalar = this.stringifyPaperValue(value);
+            if (scalar) cleaned[key] = scalar;
+        }
+        return cleaned;
+    }
+
+    prepareFieldValueForWrite(field, value) {
+        const fieldType = String(field?.type || 'text').toLowerCase();
+        if (fieldType === 'checkbox') {
+            const list = Array.isArray(value) ? value : [value];
+            return list
+                .map(item => this.stringifyPaperValue(item))
+                .filter(Boolean);
+        }
+        if (Array.isArray(value)) {
+            return value
+                .map(item => this.stringifyPaperValue(item))
+                .filter(Boolean)
+                .join('；');
+        }
+        return this.stringifyPaperValue(value);
+    }
+
+    getFieldOptionWriteValue(field, option) {
+        const fieldType = String(field?.type || 'text').toLowerCase();
+        const text = this.stringifyPaperValue(option?.text);
+        const rawValue = this.stringifyPaperValue(option?.value);
+        if (fieldType === 'checkbox' || fieldType === 'radio') {
+            return text || rawValue;
+        }
+        if (!rawValue || ['on', 'true', 'false'].includes(rawValue.toLowerCase())) {
+            return text || rawValue;
+        }
+        return rawValue || text;
+    }
+
+    inferCanonicalPaperType(paper) {
+        const rawType = String(paper?.documentType || paper?.type || paper?.paperType || '').toLowerCase();
+        const venue = String(paper?.venueRaw || paper?.venue || '').toLowerCase();
+        if (/(article|journal)/.test(rawType)) return '期刊论文';
+        if (/(conference|proceedings|inproceedings|meeting|symposium|workshop)/.test(rawType)) return '会议论文';
+        if (/(thesis)/.test(rawType)) return '学位论文';
+        if (/(patent)/.test(rawType)) return '专利';
+        if (/(dataset)/.test(rawType)) return '数据集';
+        if (/(preprint|arxiv)/.test(rawType)) return '预印本';
+        if (/(journal|transactions|letters|review|management|science)/.test(venue)) return '期刊论文';
+        if (/(conference|symposium|workshop|proceedings)/.test(venue)) return '会议论文';
+        return '';
+    }
+
+    isConferencePaperType(paper) {
+        return this.inferCanonicalPaperType(paper) === '会议论文';
+    }
+
+    isPlausiblePaperTitle(title, reference = {}) {
+        const text = this.stringifyPaperValue(title);
+        if (!text) return false;
+        const normalized = text.toLowerCase();
+        const venueCandidates = [
+            reference.venue,
+            reference.venueRaw,
+            reference.venueFormatted,
+            reference.conferenceName,
+            reference.conferenceTitle
+        ].map(item => this.stringifyPaperValue(item).toLowerCase()).filter(Boolean);
+        if (venueCandidates.includes(normalized)) return false;
+        if (/^[A-Z0-9 .&-]{2,24}$/.test(text) && !/[a-z]/.test(text)) return false;
+        return true;
+    }
+
+    normalizeComparableText(value) {
+        return this.stringifyPaperValue(value)
+            .toLowerCase()
+            .replace(/[（）()\[\]{}:：;；,.，。"'“”‘’`~!@#$%^&*+=<>?/\\|_-]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    tokenizeComparableText(value) {
+        return this.normalizeComparableText(value)
+            .split(' ')
+            .map(token => token.trim())
+            .filter(token => token && token.length > 1);
+    }
+
+    compareTextOverlap(a, b) {
+        const tokensA = new Set(this.tokenizeComparableText(a));
+        const tokensB = new Set(this.tokenizeComparableText(b));
+        if (!tokensA.size || !tokensB.size) return 0;
+        let shared = 0;
+        for (const token of tokensA) {
+            if (tokensB.has(token)) shared++;
+        }
+        return shared / Math.max(tokensA.size, tokensB.size);
+    }
+
+    scoreTitleCandidate(candidateTitle, reference = {}, priority = 0) {
+        const text = this.stringifyPaperValue(candidateTitle);
+        if (!text) return -1000;
+
+        let score = priority;
+        const normalized = this.normalizeComparableText(text);
+        const venueCandidates = [
+            reference.venue,
+            reference.venueRaw,
+            reference.venueFormatted,
+            reference.conferenceName,
+            reference.conferenceTitle
+        ].map(item => this.normalizeComparableText(item)).filter(Boolean);
+
+        if (this.isPlausiblePaperTitle(text, reference)) {
+            score += 60;
+        } else {
+            score -= 80;
+        }
+
+        if (venueCandidates.includes(normalized)) score -= 120;
+        if (/^[A-Z0-9 .&-]{2,24}$/.test(text) && !/[a-z]/.test(text)) score -= 60;
+        if (text.length >= 20) score += 12;
+        if (this.tokenizeComparableText(text).length >= 4) score += 18;
+        if (/\s/.test(text)) score += 6;
+        if (/[a-z]/.test(text)) score += 6;
+
+        return score;
+    }
+
+    resolveCanonicalTitle(basePaper, enrichedPaper) {
+        const baseTitle = this.stringifyPaperValue(basePaper?.title);
+        const enrichedTitle = this.stringifyPaperValue(enrichedPaper?.title);
+        const reference = { ...(basePaper || {}), ...(enrichedPaper || {}) };
+
+        const candidates = [
+            { source: 'base', value: baseTitle, score: this.scoreTitleCandidate(baseTitle, reference, 20) },
+            { source: 'enriched', value: enrichedTitle, score: this.scoreTitleCandidate(enrichedTitle, reference, 16) }
+        ].filter(item => item.value);
+
+        if (!candidates.length) return '';
+        if (candidates.length === 1) return candidates[0].value;
+
+        const [first, second] = candidates.sort((a, b) => b.score - a.score);
+        const overlap = this.compareTextOverlap(first.value, second.value);
+        if (overlap >= 0.35) {
+            return first.value.length >= second.value.length ? first.value : second.value;
+        }
+        return first.score >= second.score ? first.value : second.value;
+    }
+
+    buildCanonicalSelectedPaper(basePaper, enrichedPaper) {
+        const base = { ...(basePaper || {}) };
+        const enriched = { ...(enrichedPaper || {}) };
+        const canonical = {};
+        const pickString = (...values) => values.map(item => this.stringifyPaperValue(item)).find(Boolean) || '';
+        const pickList = (...values) => {
+            for (const value of values) {
+                const list = this.normalizePaperListValue(value);
+                if (list.length) return list;
+            }
+            return [];
+        };
+        const baseTitle = pickString(base.title);
+        const enrichedTitle = pickString(enriched.title);
+
+        canonical.doi = pickString(base.doi, enriched.doi);
+        canonical.title = this.resolveCanonicalTitle(base, enriched);
+        canonical.authors = pickList(base.authors, enriched.authors);
+        canonical.authorAffiliations = pickList(enriched.authorAffiliations, base.authorAffiliations);
+        canonical.year = pickString(base.year, enriched.year);
+        canonical.url = pickString(base.url, enriched.url);
+        canonical.source = pickString(enriched.source, base.source);
+        canonical.documentType = pickString(enriched.documentType, base.documentType);
+        canonical.paperType = this.inferCanonicalPaperType({ ...base, ...enriched, ...canonical });
+
+        canonical.venue = pickString(enriched.venue, base.venue);
+        canonical.venueRaw = pickString(enriched.venueRaw, enriched.venue, base.venueRaw, base.venue);
+        canonical.venueShort = pickString(enriched.venueShort, base.venueShort);
+        canonical.venueFormatted = pickString(enriched.venueFormatted, canonical.venue);
+        canonical.ccfRating = pickString(enriched.ccfRating, base.ccfRating);
+
+        canonical.abstract = pickString(enriched.abstract, base.abstract);
+        canonical.keywords = pickList(enriched.keywords, base.keywords);
+        canonical.citationCount = enriched.citationCount != null ? enriched.citationCount : base.citationCount;
+        canonical.funding = Array.isArray(enriched.funding) ? enriched.funding : (Array.isArray(base.funding) ? base.funding : []);
+        canonical.grants = Array.isArray(enriched.grants) ? enriched.grants : (Array.isArray(base.grants) ? base.grants : []);
+        canonical.indexing = pickList(enriched.indexing, base.indexing, enriched.indexings, base.indexings, enriched.indexedBy, base.indexedBy);
+        canonical.notes = pickString(enriched.notes, enriched.note, base.notes, base.note);
+        canonical.articleNumber = pickString(enriched.articleNumber, base.articleNumber);
+        canonical.firstPage = pickString(enriched.firstPage, base.firstPage);
+        canonical.lastPage = pickString(enriched.lastPage, base.lastPage);
+        canonical.pageRange = pickString(enriched.pageRange, base.pageRange);
+        canonical.publicationDate = pickString(enriched.publicationDate, base.publicationDate);
+        canonical.publicationMonth = pickString(enriched.publicationMonth, base.publicationMonth);
+        canonical.publicationDay = pickString(enriched.publicationDay, base.publicationDay);
+        canonical.volume = pickString(enriched.volume, base.volume);
+        canonical.issue = pickString(enriched.issue, base.issue);
+        canonical.language = this.normalizeLanguageLabel(pickString(enriched.language, base.language, this.guessLanguageFromTitle(canonical.title)));
+        canonical.openAccessPdf = enriched.openAccessPdf || base.openAccessPdf || '';
+        canonical.wosUid = pickString(enriched.wosUid, base.wosUid);
+
+        if (this.isConferencePaperType(canonical)) {
+            canonical.conferenceName = pickString(enriched.conferenceName, enriched.conferenceTitle, base.conferenceName, base.conferenceTitle);
+            canonical.conferenceTitle = pickString(enriched.conferenceTitle, enriched.conferenceName, base.conferenceTitle, base.conferenceName);
+            canonical.conferenceLocation = pickString(enriched.conferenceLocation, base.conferenceLocation);
+            canonical.conferenceEventDate = pickString(enriched.conferenceEventDate, base.conferenceEventDate);
+            canonical.conferenceStartDate = pickString(enriched.conferenceStartDate, base.conferenceStartDate);
+            canonical.conferenceEndDate = pickString(enriched.conferenceEndDate, base.conferenceEndDate);
+            canonical.conferenceStartMonth = pickString(enriched.conferenceStartMonth, base.conferenceStartMonth);
+            canonical.conferenceStartDay = pickString(enriched.conferenceStartDay, base.conferenceStartDay);
+            canonical.conferenceEndMonth = pickString(enriched.conferenceEndMonth, base.conferenceEndMonth);
+            canonical.conferenceEndDay = pickString(enriched.conferenceEndDay, base.conferenceEndDay);
+            canonical.organizers = pickList(enriched.organizers, base.organizers);
+        } else {
+            canonical.conferenceName = '';
+            canonical.conferenceTitle = '';
+            canonical.conferenceLocation = '';
+            canonical.conferenceEventDate = '';
+            canonical.conferenceStartDate = '';
+            canonical.conferenceEndDate = '';
+            canonical.conferenceStartMonth = '';
+            canonical.conferenceStartDay = '';
+            canonical.conferenceEndMonth = '';
+            canonical.conferenceEndDay = '';
+            canonical.organizers = [];
+        }
+
+        canonical.displayTitle = canonical.title || baseTitle || enrichedTitle || '未命名论文';
+
+        return canonical;
+    }
+
     buildFilledContext(paper) {
-        const filterCtx = {
-            year: this.activeFilters.year,
-            venue: this.activeFilters.venue,
-            affiliation: this.searchFilters?.affiliation || '',
-            venueQuery: this.searchFilters?.venue || '',
-            yearStart: this.searchFilters?.yearStart || '',
-            yearEnd: this.searchFilters?.yearEnd || ''
-        };
+        const context = {};
         const volumeIssue = [paper.volume || '', paper.issue ? `(${paper.issue})` : ''].join('').trim();
-        return {
-            '论文标题': { label: '论文标题', answer: paper.title || '', fieldType: 'text' },
-            '论文作者': { label: '论文作者', answer: Array.isArray(paper.authors) ? paper.authors.join(', ') : (paper.authors || ''), fieldType: 'text' },
-            '作者机构': { label: '作者机构', answer: Array.isArray(paper.authorAffiliations) ? paper.authorAffiliations.join('; ') : (paper.authorAffiliations || ''), fieldType: 'text' },
-            '期刊/会议': { label: '期刊/会议', answer: paper.venueFormatted || paper.venue || '', fieldType: 'text' },
-            '期刊/会议(原始)': { label: '期刊/会议(原始)', answer: paper.venueRaw || paper.venue || '', fieldType: 'text' },
-            '会议简称': { label: '会议简称', answer: paper.venueShort || '', fieldType: 'text' },
-            'CCF评级': { label: 'CCF评级', answer: paper.ccfRating || '', fieldType: 'text' },
-            '年份': { label: '年份', answer: paper.year || '', fieldType: 'text' },
-            'DOI': { label: 'DOI', answer: paper.doi || '', fieldType: 'text' },
-            '链接': { label: '链接', answer: paper.url || '', fieldType: 'url' },
-            '摘要': { label: '摘要', answer: paper.abstract || '', fieldType: 'text' },
-            '关键词': { label: '关键词', answer: Array.isArray(paper.keywords) ? paper.keywords.join(', ') : (paper.keywords || ''), fieldType: 'text' },
-            '引用次数': { label: '引用次数', answer: paper.citationCount != null ? String(paper.citationCount) : '', fieldType: 'text' },
-            '基金/资助': { label: '基金/资助', answer: this.formatFundingInfo(paper.funding || paper.grants), fieldType: 'text' },
-            '文章号/编码': { label: '文章号/编码', answer: paper.articleNumber || '', fieldType: 'text' },
-            '起始页码': { label: '起始页码', answer: paper.firstPage || '', fieldType: 'text' },
-            '终止页码': { label: '终止页码', answer: paper.lastPage || '', fieldType: 'text' },
-            '页码': { label: '页码', answer: paper.pageRange || '', fieldType: 'text' },
-            '页码范围': { label: '页码范围', answer: paper.pageRange || '', fieldType: 'text' },
-            '卷/期': { label: '卷/期', answer: volumeIssue, fieldType: 'text' },
-            '卷号': { label: '卷号', answer: paper.volume || '', fieldType: 'text' },
-            '期号': { label: '期号', answer: paper.issue || '', fieldType: 'text' },
-            '发表日期': { label: '发表日期', answer: paper.publicationDate || '', fieldType: 'text' },
-            '发表月份': { label: '发表月份', answer: paper.publicationMonth || '', fieldType: 'text' },
-            '发表日': { label: '发表日', answer: paper.publicationDay || '', fieldType: 'text' },
-            '会议举办日期': { label: '会议举办日期', answer: paper.conferenceEventDate || '', fieldType: 'text' },
-            '会议开始日期': { label: '会议开始日期', answer: paper.conferenceStartDate || '', fieldType: 'text' },
-            '会议结束日期': { label: '会议结束日期', answer: paper.conferenceEndDate || '', fieldType: 'text' },
-            '会议开始月份': { label: '会议开始月份', answer: paper.conferenceStartMonth || '', fieldType: 'text' },
-            '会议开始日': { label: '会议开始日', answer: paper.conferenceStartDay || '', fieldType: 'text' },
-            '会议结束月份': { label: '会议结束月份', answer: paper.conferenceEndMonth || '', fieldType: 'text' },
-            '会议结束日': { label: '会议结束日', answer: paper.conferenceEndDay || '', fieldType: 'text' },
-            '文章语言': { label: '文章语言', answer: paper.language || '', fieldType: 'text' },
-            '语言': { label: '语言', answer: paper.language || '', fieldType: 'text' },
-            '会议名称': { label: '会议名称', answer: paper.conferenceName || paper.conferenceTitle || '', fieldType: 'text' },
-            '会议地点': { label: '会议地点', answer: paper.conferenceLocation || '', fieldType: 'text' },
-            '作者检索词': { label: '作者检索词', answer: this.currentAuthor || '', fieldType: 'text' },
-            '筛选条件': { label: '筛选条件', answer: JSON.stringify(filterCtx), fieldType: 'text' },
-            '数据来源': { label: '数据来源', answer: paper.source || this.currentSource || '', fieldType: 'text' }
+        const authorAffiliations = this.normalizePaperListValue(paper.authorAffiliations);
+        const push = (key, label, answer, fieldType = 'text') => {
+            const normalized = this.stringifyPaperValue(answer);
+            if (!normalized) return;
+            context[key] = { label, answer: normalized, fieldType };
         };
+
+        push('论文标题', '论文标题', paper.title);
+        push('论文作者', '论文作者', this.normalizePaperListValue(paper.authors).join(', '));
+        if (authorAffiliations.length === 1) {
+            push('作者机构', '作者机构', authorAffiliations[0]);
+        }
+        push('期刊/会议', '期刊/会议', paper.venueFormatted || paper.venue);
+        push('期刊/会议(原始)', '期刊/会议(原始)', paper.venueRaw || paper.venue);
+        push('会议简称', '会议简称', paper.venueShort);
+        push('CCF评级', 'CCF评级', paper.ccfRating);
+        push('成果类型', '成果类型', paper.paperType);
+        push('年份', '年份', paper.year);
+        push('DOI', 'DOI', paper.doi);
+        push('链接', '链接', paper.url, 'url');
+        push('摘要', '摘要', paper.abstract);
+        push('关键词', '关键词', this.normalizePaperListValue(paper.keywords).join('；'));
+        push('引用次数', '引用次数', paper.citationCount != null ? String(paper.citationCount) : '');
+        push('基金/资助', '基金/资助', this.formatFundingInfo(paper.funding || paper.grants));
+        push('文章号/编码', '文章号/编码', paper.articleNumber);
+        push('起始页码', '起始页码', paper.firstPage);
+        push('终止页码', '终止页码', paper.lastPage);
+        push('页码', '页码', paper.pageRange);
+        push('页码范围', '页码范围', paper.pageRange);
+        push('卷/期', '卷/期', volumeIssue);
+        push('卷号', '卷号', paper.volume);
+        push('期号', '期号', paper.issue);
+        push('发表日期', '发表日期', paper.publicationDate);
+        push('发表月份', '发表月份', paper.publicationMonth);
+        push('发表日', '发表日', paper.publicationDay);
+        push('文章语言', '文章语言', this.normalizeLanguageLabel(paper.language));
+        push('语言', '语言', this.normalizeLanguageLabel(paper.language));
+        push('收录情况', '收录情况', this.normalizePaperListValue(paper.indexing).join('；'));
+        push('备注', '备注', paper.notes);
+        push('作者检索词', '作者检索词', this.currentAuthor);
+        push('数据来源', '数据来源', paper.source || this.currentSource || '');
+
+        if (this.isConferencePaperType(paper)) {
+            push('会议名称', '会议名称', paper.conferenceName || paper.conferenceTitle);
+            push('会议地点', '会议地点', paper.conferenceLocation);
+            push('会议组织者', '会议组织者', this.normalizePaperListValue(paper.organizers).join('；'));
+            push('会议举办日期', '会议举办日期', paper.conferenceEventDate);
+            push('会议开始日期', '会议开始日期', paper.conferenceStartDate);
+            push('会议结束日期', '会议结束日期', paper.conferenceEndDate);
+            push('会议开始月份', '会议开始月份', paper.conferenceStartMonth);
+            push('会议开始日', '会议开始日', paper.conferenceStartDay);
+            push('会议结束月份', '会议结束月份', paper.conferenceEndMonth);
+            push('会议结束日', '会议结束日', paper.conferenceEndDay);
+        }
+
+        return context;
     }
 
     showFillModeChoice() {
@@ -1353,52 +1661,45 @@ class FormFillingSidebar {
 
     syncSelectedPaperToAgentCache() {
         if (!this.formFillingAgent || !this.selectedPaper) return;
+        const authorAffiliations = this.normalizePaperListValue(this.selectedPaper.authorAffiliations);
         if (this._tempAuthors && this._tempAuthors.length > 0) {
             this.formFillingAgent.discoveryCache._current_paper_authors = this._tempAuthors;
         }
-        const title = this.selectedPaper.title;
-        this.formFillingAgent.discoveryCache[`_paper_meta_for_${title}`] = {
-            title: title,
-            authors: this.selectedPaper.authors,
-            venue: this.selectedPaper.venueFormatted || this.selectedPaper.venue,
-            venueRaw: this.selectedPaper.venueRaw || this.selectedPaper.venue,
-            venueShort: this.selectedPaper.venueShort || '',
-            ccfRating: this.selectedPaper.ccfRating || '',
-            year: this.selectedPaper.year,
-            doi: this.selectedPaper.doi,
-            url: this.selectedPaper.url,
-            abstract: this.selectedPaper.abstract || '',
-            keywords: this.selectedPaper.keywords || [],
-            citationCount: this.selectedPaper.citationCount,
-            grants: this.selectedPaper.grants || [],
-            articleNumber: this.selectedPaper.articleNumber || '',
-            firstPage: this.selectedPaper.firstPage || '',
-            lastPage: this.selectedPaper.lastPage || '',
-            pageRange: this.selectedPaper.pageRange || '',
-            publicationDate: this.selectedPaper.publicationDate || '',
-            publicationMonth: this.selectedPaper.publicationMonth || '',
-            publicationDay: this.selectedPaper.publicationDay || '',
-            conferenceEventDate: this.selectedPaper.conferenceEventDate || '',
-            conferenceStartDate: this.selectedPaper.conferenceStartDate || '',
-            conferenceEndDate: this.selectedPaper.conferenceEndDate || '',
-            conferenceStartMonth: this.selectedPaper.conferenceStartMonth || '',
-            conferenceStartDay: this.selectedPaper.conferenceStartDay || '',
-            conferenceEndMonth: this.selectedPaper.conferenceEndMonth || '',
-            conferenceEndDay: this.selectedPaper.conferenceEndDay || '',
-            language: this.selectedPaper.language || '',
-            conferenceName: this.selectedPaper.conferenceName || '',
-            conferenceLocation: this.selectedPaper.conferenceLocation || '',
-            conferenceEvent: this.selectedPaper.conferenceEvent || null,
-            organizers: this.selectedPaper.organizers || []
-        };
+        const title = this.stringifyPaperValue(this.selectedPaper.displayTitle || this.selectedPaper.title) || (this.selectedPaper.doi ? `paper_${this.selectedPaper.doi}` : 'selected_paper');
+        this.formFillingAgent.discoveryCache._selected_paper_title = title;
         this.formFillingAgent.discoveryCache[`_venue_for_${title}`] = this.selectedPaper.venueFormatted || this.selectedPaper.venue;
         this.formFillingAgent.discoveryCache[`_venue_raw_for_${title}`] = this.selectedPaper.venueRaw || this.selectedPaper.venue;
         this.formFillingAgent.discoveryCache[`_year_for_${title}`] = this.selectedPaper.year;
+        this.formFillingAgent.discoveryCache[`_paper_type_for_${title}`] = this.selectedPaper.paperType || '';
+        this.formFillingAgent.discoveryCache[`_language_for_${title}`] = this.normalizeLanguageLabel(this.selectedPaper.language);
         if (this.selectedPaper.abstract) this.formFillingAgent.discoveryCache[`_abstract_for_${title}`] = this.selectedPaper.abstract;
         if (this.selectedPaper.keywords && this.selectedPaper.keywords.length) {
             this.formFillingAgent.discoveryCache[`_keywords_for_${title}`] = Array.isArray(this.selectedPaper.keywords) ? this.selectedPaper.keywords.join(', ') : this.selectedPaper.keywords;
         }
         if (this.selectedPaper.citationCount != null) this.formFillingAgent.discoveryCache[`_citation_for_${title}`] = this.selectedPaper.citationCount;
+        if (this.selectedPaper.funding || this.selectedPaper.grants) {
+            this.formFillingAgent.discoveryCache[`_funding_for_${title}`] = this.formatFundingInfo(this.selectedPaper.funding || this.selectedPaper.grants);
+        }
+        if (authorAffiliations.length === 1) {
+            this.formFillingAgent.discoveryCache[`_author_affiliation_for_${title}`] = authorAffiliations[0];
+        }
+        if (authorAffiliations.length > 1) {
+            this.formFillingAgent.discoveryCache[`_author_affiliations_list_for_${title}`] = authorAffiliations;
+        }
+        if (this.selectedPaper.indexing && this.selectedPaper.indexing.length) {
+            this.formFillingAgent.discoveryCache[`_indexing_for_${title}`] = this.normalizePaperListValue(this.selectedPaper.indexing).join('；');
+        }
+        if (this.selectedPaper.notes) {
+            this.formFillingAgent.discoveryCache[`_notes_for_${title}`] = this.stringifyPaperValue(this.selectedPaper.notes);
+        }
+        for (const [key, item] of Object.entries(this.filledContext || {})) {
+            const answer = this.stringifyPaperValue(item?.answer);
+            if (!answer) continue;
+            this.formFillingAgent.discoveryCache[key] = answer;
+            if (item?.label) {
+                this.formFillingAgent.discoveryCache[item.label] = answer;
+            }
+        }
         this.formFillingAgent.filledContext = this.filledContext;
     }
 
@@ -1409,6 +1710,7 @@ class FormFillingSidebar {
             this.handleAgentStep(stepInfo);
         });
         this.formFillingAgent.formTabId = this.formTabId;
+        this.formFillingAgent.selectedPaper = this.selectedPaper;
 
         const formStructure = {
             title: '当前表单',
@@ -1477,7 +1779,7 @@ class FormFillingSidebar {
         requireWhenNeeded(needs.pages, 'pages', paper.pageRange || `${paper.firstPage || ''}${paper.lastPage || ''}`);
         requireWhenNeeded(needs.publicationDate, 'publicationDate', paper.publicationDate);
         requireWhenNeeded(needs.language, 'language', paper.language);
-        requireWhenNeeded(needs.conference, 'conference', paper.conferenceName || paper.conferenceLocation || paper.conferenceEventDate);
+        requireWhenNeeded(needs.conference && this.isConferencePaperType(paper), 'conference', paper.conferenceName || paper.conferenceLocation || paper.conferenceEventDate);
         requireWhenNeeded(needs.volumeIssue, 'volumeIssue', paper.volume || paper.issue);
         requireWhenNeeded(needs.authorAffiliations, 'authorAffiliations', paper.authorAffiliations);
         return missing;
@@ -1486,7 +1788,7 @@ class FormFillingSidebar {
     async enrichSelectedPaperMetadata(basePaper) {
         const merged = { ...(basePaper || {}) };
         const doi = merged.doi;
-        if (!doi) return merged;
+        if (!doi) return this.buildCanonicalSelectedPaper(basePaper, merged);
 
         const needs = this.inferPaperMetadataNeeds();
         const needAbstract = needs.abstract;
@@ -1534,7 +1836,7 @@ class FormFillingSidebar {
 
         const missingAfterWos = this.getMissingMetadataKeys(merged, needs);
         if (wosSuccess && missingAfterWos.length === 0) {
-            return merged;
+            return this.buildCanonicalSelectedPaper(basePaper, merged);
         }
 
         let selectOpenAlex = [...baseFields];
@@ -1570,26 +1872,31 @@ class FormFillingSidebar {
             }
         }
 
-        return merged;
+        return this.buildCanonicalSelectedPaper(basePaper, merged);
     }
 
     async selectPaper(paper) {
         console.log('用户选择了论文:', paper);
-        this.selectedPaper = { ...(paper || {}) };
-        this.setStatus(`已选择: ${paper.title}，正在预取详细元数据...`, 'searching');
+        const basePaper = { ...(paper || {}) };
+        const baseTitle = this.stringifyPaperValue(basePaper.title);
+        this.selectedPaper = basePaper;
+        this.setStatus(`已选择: ${baseTitle || '未命名论文'}，正在预取详细元数据...`, 'searching');
         try {
-            this.selectedPaper = await this.enrichSelectedPaperMetadata(this.selectedPaper);
+            this.selectedPaper = await this.enrichSelectedPaperMetadata(basePaper);
         } catch (e) {
             console.warn('补充论文元数据失败:', e);
             this.setStatus(`详细元数据获取失败，将使用当前数据: ${e.message}`, 'warning');
+            this.selectedPaper = this.buildCanonicalSelectedPaper(basePaper, basePaper);
         }
 
-        const venueBase = this.selectedPaper.venue || this.selectedPaper.conferenceName || '';
+        const venueBase = this.selectedPaper.venue || (this.isConferencePaperType(this.selectedPaper) ? this.selectedPaper.conferenceName : '');
         const { formatted, shortName, rating } = this.formatVenueWithYearAndCCF(venueBase, this.selectedPaper.year);
         this.selectedPaper.venueRaw = venueBase;
         this.selectedPaper.venueFormatted = formatted || venueBase;
         this.selectedPaper.venueShort = shortName || '';
         this.selectedPaper.ccfRating = rating || '';
+        this.selectedPaper.paperType = this.inferCanonicalPaperType(this.selectedPaper);
+        this.selectedPaper.language = this.normalizeLanguageLabel(this.selectedPaper.language);
 
         window.__tempAuthors = (this.selectedPaper.authors || []).map((name, index) => {
             let affiliation = '';
@@ -1600,9 +1907,12 @@ class FormFillingSidebar {
         });
         this._tempAuthors = window.__tempAuthors;
         console.log('✅ 已保存作者列表到 window.__tempAuthors:', window.__tempAuthors);
+        console.groupCollapsed('[SelectedPaper] 规范化结果');
+        console.log(this.selectedPaper);
+        console.groupEnd();
         
         this.filledContext = this.buildFilledContext(this.selectedPaper);
-        this.setStatus(`已选择: ${this.selectedPaper.title}，详细数据已缓存`, 'success');
+        this.setStatus(`已选择: ${this.stringifyPaperValue(this.selectedPaper.displayTitle || this.selectedPaper.title || baseTitle) || '未命名论文'}，详细数据已缓存`, 'success');
 
         // 将作者列表存入发现缓存，供表格处理使用
         if (this.formFillingAgent) {
@@ -1706,9 +2016,13 @@ class FormFillingSidebar {
         try {
             await this.initializeFillingRuntime();
             const planner = new WholeFormPlanner(this.aiSettings.enableAI !== false ? this.formFillingAgent?.llmClient || null : null);
-            const planResult = await planner.createPlan({
+            const typedFacts = buildTypedFacts({
                 paper: this.selectedPaper,
                 filledContext: this.filledContext,
+                discoveryCache: this.formFillingAgent?.discoveryCache || {}
+            });
+            const planResult = await planner.createPlan({
+                facts: typedFacts,
                 fields: this.currentFormFields
             });
             const summary = await this.executeWholeFormPlan(planResult);
@@ -1794,11 +2108,12 @@ class FormFillingSidebar {
         }
 
         try {
+            const writeValue = this.prepareFieldValueForWrite(field, value);
             const response = await this.sendMessageToBackground({
                 action: 'fillFormField',
                 data: {
                     fieldName: field.name,
-                    value: value,
+                    value: writeValue,
                     fieldSelector: field.selector || '',
                     tabId: this.formTabId
                 }
@@ -1810,12 +2125,12 @@ class FormFillingSidebar {
             }
 
             const rawAnswerText = displayText != null ? displayText : value;
-            const answerText = Array.isArray(rawAnswerText) ? rawAnswerText.join('；') : rawAnswerText;
+            const answerText = this.stringifyPaperValue(rawAnswerText);
 
             this.filledFields[field.name] = {
                 label: field.label || field.name,
                 answer: answerText,
-                value: value,
+                value: writeValue,
                 method: method,
                 fieldType: field.type || 'text',
                 timestamp: Date.now()
@@ -1829,6 +2144,10 @@ class FormFillingSidebar {
 
             if (this.formFillingAgent) {
                 this.formFillingAgent.filledContext = this.filledContext;
+                this.formFillingAgent.discoveryCache[field.name] = answerText;
+                if (field.label) {
+                    this.formFillingAgent.discoveryCache[field.label] = answerText;
+                }
             }
 
             this.updateStats();
@@ -2172,7 +2491,7 @@ class FormFillingSidebar {
             
             // 2. 缓存命中分支
             if (aiResult.fromCache) {
-                const ans = String(aiResult.answer || '').trim();
+                const ans = this.stringifyPaperValue(aiResult.answer);
                 if (!ans || ans.toUpperCase() === 'UNKNOWN') {
                     this.updateFieldStatus(field.name, 'warning', `⚠️ 缓存中无有效答案`);
                     this.setStatus('AI 未找到答案，请手动输入', 'warning');
@@ -2194,13 +2513,15 @@ class FormFillingSidebar {
             if (aiResult.success) {
                 // 如果 AI 在本次思考中提取到了额外信息，同步到缓存
                 if (aiResult.discoveryData) {
-                    console.log('💡 AI 发现了群组缓存数据:', aiResult.discoveryData);
-                    Object.assign(this.formFillingAgent.discoveryCache, aiResult.discoveryData);
+                    const cleanDiscoveryData = this.sanitizeDiscoveryData(aiResult.discoveryData);
+                    console.log('💡 AI 发现了群组缓存数据:', cleanDiscoveryData);
+                    Object.assign(this.formFillingAgent.discoveryCache, cleanDiscoveryData);
+                    aiResult.discoveryData = cleanDiscoveryData;
                 }
                 
                 // 3.1 普通答案（Finish）
                 if (aiResult.type === 'finish') {
-                    const ans = String(aiResult.answer || '').trim();
+                    const ans = this.stringifyPaperValue(aiResult.answer);
                     if (!ans || ans.toUpperCase() === 'UNKNOWN') {
                         this.setStatus('AI 未找到答案，请手动输入', 'warning');
                         this.showManualInputInterface(field);
@@ -2328,8 +2649,10 @@ class FormFillingSidebar {
         const fieldOptionsMap = new Map();
         if (field.options && field.options.length) {
             field.options.forEach(opt => {
-                fieldOptionsMap.set(opt.text, opt.value);
-                if (opt.value) fieldOptionsMap.set(opt.value, opt.value);
+                const text = this.stringifyPaperValue(opt.text);
+                const value = this.getFieldOptionWriteValue(field, opt);
+                if (text) fieldOptionsMap.set(text, value);
+                if (opt.value) fieldOptionsMap.set(this.stringifyPaperValue(opt.value), value);
             });
         }
         
@@ -2354,8 +2677,8 @@ class FormFillingSidebar {
                         if (!value) value = opt;
                     }
                 } else if (opt && typeof opt === 'object') {
-                    text = opt.text || '';
-                    value = opt.value || opt.text || '';
+                    text = this.stringifyPaperValue(opt.text || opt.label || '');
+                    value = this.stringifyPaperValue(opt.value || opt.text || opt.label || '');
                     // 同样尝试匹配
                     if (fieldOptionsMap.has(value)) value = fieldOptionsMap.get(value);
                     if (fieldOptionsMap.has(text)) value = fieldOptionsMap.get(text);
@@ -3149,8 +3472,7 @@ class FormFillingSidebar {
         }
         if (label.includes('citation') || label.includes('引用')) return paper.citationCount != null ? String(paper.citationCount) : '';
         if (label.includes('grant') || label.includes('fund') || label.includes('基金') || label.includes('资助')) {
-            if (Array.isArray(paper.grants)) return JSON.stringify(paper.grants);
-            return paper.grants || '';
+            return this.formatFundingInfo(paper.funding || paper.grants);
         }
         return '';
     }
