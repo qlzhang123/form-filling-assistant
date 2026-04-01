@@ -90,7 +90,7 @@ const getStoredWosApiKey = () => {
 };
 
 const WOS_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const WOS_CACHE_VERSION = 2;
+const WOS_CACHE_VERSION = 4;
 
 const getWosCacheKey = (doi) => `_wos_cache_${normalizeDoi(doi).toLowerCase()}`;
 
@@ -835,6 +835,12 @@ const collectNestedArray = (root, candidates) => {
     return [];
 };
 
+const ensureArray = (value) => {
+    if (Array.isArray(value)) return value;
+    if (value == null || value === '') return [];
+    return [value];
+};
+
 const flattenSourceText = (value, seen = new WeakSet(), depth = 0) => {
     if (value == null || depth > 5) return '';
     if (typeof value === 'string') return value.trim();
@@ -885,16 +891,95 @@ const firstNonEmptyString = (...values) => {
 };
 
 const parseWosPageRange = (page) => {
+    if (!page) return { firstPage: '', lastPage: '', pageRange: '' };
+    if (typeof page === 'object') {
+        const firstPage = firstNonEmptyString(page.begin, page.first_page, page.firstPage, page.page_begin);
+        const lastPage = firstNonEmptyString(page.end, page.last_page, page.lastPage, page.page_end);
+        const explicitRange = firstNonEmptyString(page.page_range, page.range, page.value, page.content);
+        if (firstPage || lastPage) {
+            const pageRange = firstPage && lastPage ? `${firstPage}-${lastPage}` : (firstPage || lastPage);
+            return { firstPage, lastPage, pageRange };
+        }
+        if (explicitRange) return parsePageRange(explicitRange);
+        return { firstPage: '', lastPage: '', pageRange: '' };
+    }
     const raw = String(page || '').trim();
     if (!raw) return { firstPage: '', lastPage: '', pageRange: '' };
     return parsePageRange(raw);
 };
 
-const parseWosPublicationParts = (sortdate, year) => {
-    const parts = parseIsoDateParts(sortdate || '');
-    if (parts.publicationYear) return parts;
-    const y = year != null ? String(year).trim() : '';
-    return { publicationDate: y, publicationYear: y, publicationMonth: '', publicationDay: '' };
+const MONTH_TO_NUMBER = {
+    JAN: '01',
+    FEB: '02',
+    MAR: '03',
+    APR: '04',
+    MAY: '05',
+    JUN: '06',
+    JUL: '07',
+    AUG: '08',
+    SEP: '09',
+    OCT: '10',
+    NOV: '11',
+    DEC: '12'
+};
+
+const parseWosLooseDate = (value, fallbackYear = '') => {
+    const raw = String(value || '').trim();
+    if (!raw && !fallbackYear) {
+        return { raw: '', publicationDate: '', publicationYear: '', publicationMonth: '', publicationDay: '' };
+    }
+    const iso = parseIsoDateParts(raw);
+    if (iso.publicationYear) {
+        return { raw, ...iso };
+    }
+
+    const monthYearMatch = raw.match(/\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b[\s,/-]*(\d{4})/i);
+    if (monthYearMatch) {
+        const month = MONTH_TO_NUMBER[monthYearMatch[1].toUpperCase()] || '';
+        const year = monthYearMatch[2] || '';
+        const publicationDate = [year, month].filter(Boolean).join('-');
+        return {
+            raw,
+            publicationDate,
+            publicationYear: year,
+            publicationMonth: month,
+            publicationDay: ''
+        };
+    }
+
+    const yearMatch = raw.match(/\b(19|20)\d{2}\b/);
+    const year = yearMatch ? yearMatch[0] : String(fallbackYear || '').trim();
+    if (!year) {
+        return { raw, publicationDate: '', publicationYear: '', publicationMonth: '', publicationDay: '' };
+    }
+    return {
+        raw,
+        publicationDate: year,
+        publicationYear: year,
+        publicationMonth: '',
+        publicationDay: ''
+    };
+};
+
+const parseWosPublicationParts = (pubInfo = {}) => {
+    const publication = parseWosLooseDate(
+        pubInfo.sortdate || pubInfo.sort_date || [pubInfo.pubmonth, pubInfo.pubyear].filter(Boolean).join(' '),
+        pubInfo.pubyear || pubInfo.year || ''
+    );
+    const earlyAccess = parseWosLooseDate(
+        pubInfo.early_access_date || pubInfo.earlyAccessDate || pubInfo.early_access || '',
+        pubInfo.early_access_year || pubInfo.earlyAccessYear || ''
+    );
+    return {
+        publicationDate: publication.publicationDate,
+        publicationYear: publication.publicationYear,
+        publicationMonth: publication.publicationMonth,
+        publicationDay: publication.publicationDay,
+        earlyAccessDate: earlyAccess.publicationDate,
+        earlyAccessYear: earlyAccess.publicationYear,
+        earlyAccessMonth: earlyAccess.publicationMonth,
+        earlyAccessDay: earlyAccess.publicationDay
+    };
 };
 
 const normalizeWosTitleText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
@@ -945,41 +1030,313 @@ const chooseBestWosVenue = (titles) => {
     return candidates[0] || '';
 };
 
-const parseWosAuthors = (record) => {
-    const names = [];
-    const affiliations = [];
-    const seenNames = new Set();
-    const nameEntries = collectNestedArray(record, [
-        'static_data.summary.names.name',
-        'static_data.fullrecord_metadata.addresses.address_name.names.name',
-        'static_data.item.authors.authors'
-    ]);
-    for (const item of nameEntries) {
-        const fullName = firstNonEmptyString(item.full_name, item.display_name, item.wos_standard, item.fullName);
-        if (fullName && !seenNames.has(fullName)) {
-            seenNames.add(fullName);
-            names.push(fullName);
-        }
+const dedupeTextList = (items) => Array.from(new Set((Array.isArray(items) ? items : []).map(item => String(item || '').trim()).filter(Boolean)));
+
+const parseAddrNoList = (value) => {
+    if (value == null) return [];
+    if (Array.isArray(value)) return dedupeTextList(value.map(item => String(item).trim()));
+    const text = String(value || '').trim();
+    if (!text) return [];
+    return dedupeTextList(text.split(/[\s,;；|]+/).map(item => item.trim()).filter(Boolean));
+};
+
+const expandAcademicOrganizationName = (value) => {
+    let text = String(value || '').trim();
+    if (!text) return '';
+    const replacements = [
+        [/\bUniv\b/gi, 'University'],
+        [/\bInst\b/gi, 'Institute'],
+        [/\bTechnol\b/gi, 'Technology'],
+        [/\bEcon\b/gi, 'Economics'],
+        [/\bComp\b/gi, 'Computer'],
+        [/\bSci\b/gi, 'Science'],
+        [/\bSch\b/gi, 'School'],
+        [/\bDept\b/gi, 'Department'],
+        [/\bColl\b/gi, 'College'],
+        [/\bLab\b/gi, 'Laboratory'],
+        [/\bCtr\b/gi, 'Center'],
+        [/\bNatl\b/gi, 'National'],
+        [/\bAcad\b/gi, 'Academy'],
+        [/\bEngn\b/gi, 'Engineering'],
+        [/\bEng\b/gi, 'Engineering'],
+        [/\bRes\b/gi, 'Research']
+    ];
+    for (const [pattern, replacement] of replacements) {
+        text = text.replace(pattern, replacement);
     }
+    text = text.replace(/\b&\b/g, 'and');
+    text = text.replace(/\s+/g, ' ').trim();
+    return text;
+};
+
+const scoreAcademicInstitutionName = (value) => {
+    const text = String(value || '').trim();
+    if (!text) return -1000;
+    const normalized = text.toLowerCase();
+    let score = 0;
+
+    if (/\b(university|institute|academy|college)\b/i.test(text)) score += 60;
+    if (/\b(of)\b/i.test(text)) score += 10;
+    if (/\b(technology|economics|science|finance|medicine|education|engineering|business|agriculture)\b/i.test(text)) score += 8;
+
+    if (/\b(faculty|school|department|lab|laboratory|center|centre|college of|school of|dept|hospital)\b/i.test(text)) score -= 30;
+    if (/\b(peoples r china|china|liaoning|beijing|dalian)\b/i.test(normalized) && /,/.test(text)) score -= 8;
+    if (/\b(university|institute|academy|college)\b/i.test(text) && !/\b(faculty|school|department|lab|laboratory|center|centre)\b/i.test(text)) score += 25;
+    if (/^[A-Z][A-Za-z& ]{8,120}$/.test(text)) score += 5;
+
+    score += Math.min(text.length, 80) * 0.2;
+    return score;
+};
+
+const choosePrimaryAcademicInstitution = (candidates) => {
+    const scored = dedupeTextList(candidates)
+        .map(name => ({ name, score: scoreAcademicInstitutionName(name) }))
+        .sort((a, b) => b.score - a.score);
+    return scored[0]?.name || '';
+};
+
+const extractWosOrganizationName = (organization) => {
+    if (!organization || typeof organization !== 'object') return '';
+    return expandAcademicOrganizationName(
+        firstNonEmptyString(
+            organization.content,
+            organization.name,
+            organization.display_name,
+            organization.displayName,
+            organization.full_name,
+            organization.fullName
+        )
+    );
+};
+
+const formatOrganizationLabel = (organization) => {
+    if (!organization) return '';
+    return firstNonEmptyString(
+        organization.preferredName,
+        (organization.organizationChain || []).sort((a, b) => b.length - a.length).join(' / '),
+        organization.fullAddress,
+        [organization.city, organization.country].filter(Boolean).join(', ')
+    );
+};
+
+const parseWosOrganizations = (record) => {
+    const organizations = [];
+    const byId = new Map();
     const addressEntries = collectNestedArray(record, [
         'static_data.fullrecord_metadata.addresses.address_name',
-        'static_data.fullrecord_metadata.addresses.address_spec',
-        'static_data.fullrecord_metadata.addresses'
+        'static_data.fullrecord_metadata.addresses.address_spec'
     ]);
-    for (const addr of addressEntries) {
-        const addressSpec = addr.address_spec || addr.addressSpec || addr;
-        const orgs = collectNestedArray(addressSpec, ['organizations.organization', 'organization']);
-        const orgNames = orgs.map(org => firstNonEmptyString(org.content, org.pref, org.name)).filter(Boolean);
-        const addressText = firstNonEmptyString(
-            orgNames.join(', '),
-            addressSpec.full_address,
-            [addressSpec.city, addressSpec.state, addressSpec.country].filter(Boolean).join(', ')
-        );
-        if (addressText) affiliations.push(addressText);
+
+    addressEntries.forEach((entry, index) => {
+        const addressSpec = entry.address_spec || entry.addressSpec || entry;
+        const orgEntries = collectNestedArray(addressSpec, ['organizations.organization', 'organization']);
+        const namedOrganizations = orgEntries
+            .map(org => ({
+                name: extractWosOrganizationName(org),
+                preferred: String(org?.pref || '').toUpperCase() === 'Y'
+            }))
+            .filter(item => item.name);
+        const organizationChain = dedupeTextList(namedOrganizations.map(item => item.name));
+        const preferredOrganization = choosePrimaryAcademicInstitution([
+            ...organizationChain,
+            ...ensureArray(addressSpec.full_address)
+                .map(item => expandAcademicOrganizationName(firstNonEmptyString(item)))
+                .flatMap(item => String(item || '').split(','))
+                .map(item => item.trim())
+                .filter(Boolean)
+        ]) || namedOrganizations.find(item => item.preferred)?.name || '';
+        const fullAddress = firstNonEmptyString(addressSpec.full_address, entry.full_address);
+        const id = firstNonEmptyString(entry.addr_no, addressSpec.addr_no, addressSpec.address_no) || `ADDR_${index + 1}`;
+        const organization = {
+            id,
+            fullAddress,
+            city: firstNonEmptyString(addressSpec.city),
+            state: firstNonEmptyString(addressSpec.state),
+            country: firstNonEmptyString(addressSpec.country),
+            zip: firstNonEmptyString(addressSpec.zip, addressSpec.postal_code),
+            organizationChain,
+            preferredName: preferredOrganization || '',
+            rorId: firstNonEmptyString(addressSpec.ror_id, addressSpec.rorId)
+        };
+        organizations.push(organization);
+        byId.set(String(id), organization);
+    });
+
+    if (organizations.length) {
+        console.groupCollapsed('[WoS] 机构归一化');
+        console.log(organizations);
+        console.groupEnd();
+    }
+
+    return { organizations, organizationById: byId };
+};
+
+const parseWosAuthors = (record) => {
+    const summaryNames = collectNestedArray(record, ['static_data.summary.names.name']);
+    const { organizations, organizationById } = parseWosOrganizations(record);
+    const authorsDetailed = [];
+    const authors = [];
+    const authorAffiliations = [];
+    const seenNames = new Set();
+
+    ensureArray(summaryNames).forEach((item, index) => {
+        const fullName = firstNonEmptyString(item.full_name, item.display_name, item.wos_standard, item.fullName);
+        if (!fullName || seenNames.has(fullName)) return;
+        seenNames.add(fullName);
+
+        const affiliationIds = parseAddrNoList(item.addr_no || item.addr_no_list || item.addrNo);
+        const linkedOrganizations = affiliationIds
+            .map(id => organizationById.get(String(id)))
+            .filter(Boolean);
+        const fallbackOrganization = organizations[index] ? [organizations[index]] : [];
+        const organizationsForAuthor = linkedOrganizations.length ? linkedOrganizations : fallbackOrganization;
+        const affiliationTexts = dedupeTextList(organizationsForAuthor.map(formatOrganizationLabel));
+        const affiliationText = affiliationTexts.join('；');
+
+        const author = {
+            fullName,
+            firstName: firstNonEmptyString(item.first_name, item.firstName, item.given_name),
+            lastName: firstNonEmptyString(item.last_name, item.lastName, item.family_name),
+            seqNo: firstNonEmptyString(item.seq_no, index + 1),
+            orcid: firstNonEmptyString(item.orcid_id, item.orcid),
+            researcherId: firstNonEmptyString(item.r_id, item.researcher_id, item.researcherId),
+            reprint: String(item.reprint || '').toUpperCase() === 'Y',
+            affiliationIds,
+            affiliations: affiliationTexts,
+            affiliationText
+        };
+
+        authorsDetailed.push(author);
+        authors.push(fullName);
+        authorAffiliations.push(affiliationText);
+    });
+
+    return {
+        authors,
+        authorAffiliations,
+        authorsDetailed,
+        organizations
+    };
+};
+
+const extractWosIdentifiers = (record) => {
+    const entries = collectNestedArray(record, ['dynamic_data.cluster_related.identifiers.identifier']);
+    const identifiers = {};
+    for (const entry of entries) {
+        const type = String(entry?.type || '').trim().toLowerCase();
+        const value = firstNonEmptyString(entry?.value, entry?.content, entry);
+        if (!type || !value) continue;
+        identifiers[type] = value;
     }
     return {
-        authors: names,
-        authorAffiliations: Array.from(new Set(affiliations)).filter(Boolean)
+        identifiers,
+        articleNumber: firstNonEmptyString(identifiers.art_no, identifiers.article_number, identifiers.article, identifiers.artno),
+        issn: firstNonEmptyString(identifiers.issn),
+        eissn: firstNonEmptyString(identifiers.eissn),
+        isbn: firstNonEmptyString(identifiers.isbn)
+    };
+};
+
+const extractWosCitationCount = (record) => {
+    const siloList = collectNestedArray(record, ['dynamic_data.citation_related.tc_list.silo_tc']);
+    const preferred = siloList.find(item => String(item?.coll_id || '').toUpperCase() === 'WOS') || siloList[0];
+    const raw = firstNonEmptyString(preferred?.local_count, preferred?.count, preferred?.value);
+    const parsed = parseInt(raw, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+};
+
+const extractWosFunding = (fullMeta) => {
+    const grants = collectNestedArray(fullMeta, ['fund_ack.grants.grant', 'fund_ack.grant'])
+        .map(item => ({
+            funder: firstNonEmptyString(item.grant_agency, item.agency, item.funder_name),
+            agencyNames: dedupeTextList(ensureArray(item.grant_agency_names?.grant_agency_name).map(entry => firstNonEmptyString(entry.content, entry.value, entry))),
+            awardId: firstNonEmptyString(item.grant_ids?.grant_id, item.grant_id, item.award_id, item.grantId)
+        }))
+        .filter(item => item.funder || item.agencyNames.length || item.awardId);
+
+    const deduped = [];
+    const seen = new Set();
+    for (const item of grants) {
+        const key = `${item.funder}__${item.awardId}__${item.agencyNames.join('|')}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(item);
+    }
+
+    return {
+        grants: deduped,
+        fundingText: firstNonEmptyString(getNestedValue(fullMeta, 'fund_ack.fund_text.p', ''), getNestedValue(fullMeta, 'fund_ack.fund_text', ''))
+    };
+};
+
+const cleanWosAbstractText = (value) => {
+    const text = firstNonEmptyString(value).replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    return text.replace(/[；;]\s*\d+\s*$/, '').trim();
+};
+
+const extractWosSubjects = (fullMeta) => {
+    const entries = collectNestedArray(fullMeta, ['category_info.subjects.subject']);
+    const out = [];
+    const seen = new Set();
+    for (const item of entries) {
+        const name = firstNonEmptyString(item.content, item.value, item);
+        const type = firstNonEmptyString(item.ascatype, item.type);
+        const code = firstNonEmptyString(item.code);
+        if (!name) continue;
+        const key = `${type}__${code}__${name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ code, name, type });
+    }
+    return out;
+};
+
+const extractWosCitationTopics = (record) => {
+    const topics = getNestedValue(record, 'dynamic_data.citation_related.citation_topics', {}) || {};
+    const extractName = (value) => firstNonEmptyString(
+        getNestedValue(value, 'topic.content', ''),
+        getNestedValue(value, 'topic', ''),
+        getNestedValue(value, 'content', ''),
+        getNestedValue(value, 'name', ''),
+        value
+    );
+    return {
+        macro: extractName(topics.macro || topics.macro_topic || topics.macro_level),
+        meso: extractName(topics.meso || topics.meso_topic || topics.meso_level),
+        micro: extractName(topics.micro || topics.micro_topic || topics.micro_level)
+    };
+};
+
+const extractWosUsageStats = (record) => {
+    const usage = getNestedValue(record, 'dynamic_data.wos_usage', {}) || {};
+    const toInt = (value) => {
+        const parsed = parseInt(firstNonEmptyString(value), 10);
+        return Number.isFinite(parsed) ? parsed : null;
+    };
+    return {
+        last180Days: toInt(usage.last180days || usage.last_180_days || usage.last180Days),
+        allTime: toInt(usage.alltime || usage.all_time || usage.allTime)
+    };
+};
+
+const extractWosPublisher = (summary) => {
+    const publisherEntries = collectNestedArray(summary, ['publishers.publisher']);
+    const publisher = publisherEntries[0] || {};
+    const names = collectNestedArray(publisher, ['names.name', 'name']);
+    return {
+        name: firstNonEmptyString(
+            names.map(item => firstNonEmptyString(item.full_name, item.unified_name, item.display_name, item.content, item)),
+            publisher.full_name,
+            publisher.unified_name,
+            publisher.display_name
+        ),
+        unifiedName: firstNonEmptyString(
+            names.map(item => firstNonEmptyString(item.unified_name, item.full_name, item.content)),
+            publisher.unified_name
+        ),
+        city: firstNonEmptyString(getNestedValue(publisher, 'address_spec.city', ''), publisher.city),
+        country: firstNonEmptyString(getNestedValue(publisher, 'address_spec.country', ''), publisher.country)
     };
 };
 
@@ -992,12 +1349,17 @@ const normalizeWosRecord = (record, doi) => {
     const fullMeta = getNestedValue(record, 'static_data.fullrecord_metadata', {}) || {};
     const keywordsPlus = collectNestedArray(fullMeta, ['keywords_plus.keyword']);
     const authorKeywords = collectNestedArray(fullMeta, ['keywords.keyword']);
-    const fundings = collectNestedArray(fullMeta, ['fund_ack.grants.grant', 'fund_ack.grant']);
     const abstractParts = collectNestedArray(fullMeta, ['abstracts.abstract.abstract_text.p', 'abstracts.abstract.abstract_text', 'abstracts.abstract.p']);
     const normalizedAuthors = parseWosAuthors(record);
     const pageInfo = parseWosPageRange(pubInfo.page || pubInfo.pages);
-    const publicationParts = parseWosPublicationParts(pubInfo.sortdate || pubInfo.sort_date, pubInfo.pubyear || pubInfo.year);
+    const publicationParts = parseWosPublicationParts(pubInfo);
     const conferenceInfo = getNestedValue(fullMeta, 'conference_info', {}) || {};
+    const identifiers = extractWosIdentifiers(record);
+    const fundingInfo = extractWosFunding(fullMeta);
+    const subjectCategories = extractWosSubjects(fullMeta);
+    const citationTopics = extractWosCitationTopics(record);
+    const usageStats = extractWosUsageStats(record);
+    const publisher = extractWosPublisher(summary);
     const venue = firstNonEmptyString(
         chooseBestWosVenue(sourceTitles),
         getNestedValue(record, 'source.title', '')
@@ -1007,18 +1369,15 @@ const normalizeWosRecord = (record, doi) => {
         normalizeWosTitleText(getNestedValue(record, 'title.value', '')),
         normalizeWosTitleText(getNestedValue(record, 'title', ''))
     );
-    const abstract = abstractParts.map(part => {
+    const abstract = cleanWosAbstractText(abstractParts.map(part => {
         if (typeof part === 'string') return part.trim();
         return firstNonEmptyString(part.content, part.value, part);
-    }).filter(Boolean).join(' ');
+    }).filter(Boolean).join(' '));
     const keywords = [
         ...keywordsPlus.map(item => firstNonEmptyString(item.content, item.value, item)),
-        ...authorKeywords.map(item => firstNonEmptyString(item.content, item.value, item))
+        ...authorKeywords.map(item => firstNonEmptyString(item.content, item.value, item)),
+        ...subjectCategories.map(item => item.name)
     ].filter(Boolean);
-    const funding = fundings.map(item => ({
-        funder: firstNonEmptyString(item.grant_agency, item.agency, item.funder_name),
-        awardId: firstNonEmptyString(item.grant_ids?.grant_id, item.grant_id, item.award_id)
-    })).filter(item => item.funder || item.awardId);
     const documentType = firstNonEmptyString(
         getNestedValue(record, 'static_data.summary.doctypes.doctype.content', ''),
         getNestedValue(record, 'static_data.summary.doctypes.doctype', '')
@@ -1037,15 +1396,30 @@ const normalizeWosRecord = (record, doi) => {
         sourceType: 'wos',
         wosUid: firstNonEmptyString(record.UID, record.uid),
         documentType: documentType,
+        publicationType: firstNonEmptyString(pubInfo.pubtype, documentType),
         abstract,
         keywords: Array.from(new Set(keywords)),
-        citationCount: getNestedValue(record, 'dynamic_data.citation_related.tc_list.silo_tc.local_count', null),
-        funding,
-        grants: funding,
-        articleNumber: firstNonEmptyString(pubInfo.article_no, pubInfo.article_number),
+        citationCount: extractWosCitationCount(record),
+        fundingText: fundingInfo.fundingText,
+        grants: fundingInfo.grants,
+        funding: fundingInfo.grants,
+        articleNumber: firstNonEmptyString(identifiers.articleNumber, pubInfo.article_no, pubInfo.article_number),
+        identifiers: identifiers.identifiers,
+        issn: identifiers.issn,
+        eissn: identifiers.eissn,
+        isbn: identifiers.isbn,
         volume: firstNonEmptyString(pubInfo.vol, pubInfo.volume),
         issue: firstNonEmptyString(pubInfo.issue),
+        pageCount: firstNonEmptyString(getNestedValue(pubInfo, 'page.page_count', ''), pubInfo.page_count),
         language: normalizeLanguageCode(firstNonEmptyString(getNestedValue(fullMeta, 'normalized_languages.language', ''), getNestedValue(fullMeta, 'languages.language', ''))),
+        publisher,
+        subjectCategories,
+        citationTopics,
+        usageStats,
+        dataAvailabilityStatement: firstNonEmptyString(getNestedValue(fullMeta, 'data_availability_statement.p', ''), getNestedValue(fullMeta, 'data_availability_statement', '')),
+        authorsDetailed: normalizedAuthors.authorsDetailed,
+        authorEntries: normalizedAuthors.authorsDetailed,
+        organizations: normalizedAuthors.organizations,
         conferenceName: isConferenceRecord ? firstNonEmptyString(conferenceInfo.conference_title, conferenceInfo.conference_name) : '',
         conferenceTitle: isConferenceRecord ? firstNonEmptyString(conferenceInfo.conference_title, conferenceInfo.conference_name) : '',
         conferenceLocation: isConferenceRecord ? firstNonEmptyString(conferenceInfo.conference_location, conferenceInfo.conference_city, conferenceInfo.conference_country) : '',

@@ -49,8 +49,25 @@ class FactNormalizer {
     }
     normalize({ paper, filledContext = {}, discoveryCache = {} }) {
         const base = paper || {};
-        const authors = splitList(base.authors);
-        const authorAffiliations = splitList(base.authorAffiliations);
+        const authorEntries = (Array.isArray(base.authorEntries) ? base.authorEntries : []).map((entry, index) => {
+            const name = flattenTextValue(entry?.fullName || entry?.name);
+            const affiliations = Array.isArray(entry?.affiliations)
+                ? entry.affiliations.map(item => flattenTextValue(item)).filter(Boolean)
+                : splitList(entry?.affiliationText || entry?.affiliation);
+            return {
+                name,
+                affiliation: affiliations.join('；'),
+                affiliations,
+                seqNo: flattenTextValue(entry?.seqNo || index + 1),
+                orcid: flattenTextValue(entry?.orcid),
+                researcherId: flattenTextValue(entry?.researcherId),
+                reprint: entry?.reprint === true
+            };
+        }).filter(entry => entry.name);
+        const authors = authorEntries.length ? authorEntries.map(item => item.name) : splitList(base.authors);
+        const authorAffiliations = authorEntries.length
+            ? authorEntries.map(item => item.affiliation).filter(Boolean)
+            : splitList(base.authorAffiliations);
         const organizers = splitList(base.organizers);
         const keywords = splitList(base.keywords);
         const publicationDate = this.dateResolver.buildDateView(base.publicationDate, base.year || '');
@@ -59,7 +76,7 @@ class FactNormalizer {
         const conferenceEnd = this.dateResolver.buildDateView(base.conferenceEndDate, base.year || '');
         const paperType = this.inferDocumentType(base);
         const isConferencePaper = paperType === '会议论文';
-        const fundingText = this.flattenFunding(base.funding || base.grants);
+        const fundingText = flattenTextValue(base.fundingText) || this.flattenFunding(base.funding || base.grants);
         const indexing = splitList(base.indexing || base.indexings || base.indexedBy);
         const notesText = flattenTextValue(base.notes || base.note);
         const facts = {
@@ -86,7 +103,13 @@ class FactNormalizer {
                 start: isConferencePaper ? conferenceStart : this.dateResolver.buildDateView('', ''),
                 end: isConferencePaper ? conferenceEnd : this.dateResolver.buildDateView('', '')
             },
-            authors: { names: authors, namesText: authors.join(', '), affiliations: authorAffiliations, affiliationsText: authorAffiliations.join('；'), entries: authors.map((name, index) => ({ name, affiliation: authorAffiliations[index] || '' })) },
+            authors: {
+                names: authors,
+                namesText: authors.join(', '),
+                affiliations: authorAffiliations,
+                affiliationsText: authorAffiliations.join('；'),
+                entries: authorEntries.length ? authorEntries : authors.map((name, index) => ({ name, affiliation: authorAffiliations[index] || '' }))
+            },
             narrative: { notesText },
             extraContext: Object.fromEntries(Object.entries(filledContext || {}).map(([key, value]) => [key, flattenTextValue(value?.answer || '')])),
             discoveryCache: discoveryCache || {}

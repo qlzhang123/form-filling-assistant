@@ -1249,6 +1249,7 @@ class FormFillingSidebar {
             const parts = [
                 this.stringifyPaperValue(item.funder),
                 this.stringifyPaperValue(item.agency),
+                Array.isArray(item.agencyNames) ? item.agencyNames.map(entry => this.stringifyPaperValue(entry)).filter(Boolean).join(' / ') : '',
                 this.stringifyPaperValue(item.awardId),
                 this.stringifyPaperValue(item.award_id),
                 this.stringifyPaperValue(item.grantId),
@@ -1299,6 +1300,52 @@ class FormFillingSidebar {
             .flatMap(item => String(item || '').split(/[;；\n]+/))
             .map(item => item.trim())
             .filter(Boolean);
+    }
+
+    normalizeAuthorEntries(value) {
+        const list = Array.isArray(value) ? value : [];
+        return list.map((item, index) => {
+            const fullName = this.stringifyPaperValue(item?.fullName || item?.name);
+            const affiliations = Array.isArray(item?.affiliations)
+                ? item.affiliations.map(entry => this.stringifyPaperValue(entry)).filter(Boolean)
+                : this.normalizePaperListValue(item?.affiliationText || item?.affiliation);
+            return {
+                fullName,
+                name: fullName,
+                firstName: this.stringifyPaperValue(item?.firstName),
+                lastName: this.stringifyPaperValue(item?.lastName),
+                affiliationIds: Array.isArray(item?.affiliationIds) ? item.affiliationIds.slice() : [],
+                affiliations,
+                affiliationText: affiliations.join('；'),
+                affiliation: affiliations.join('；'),
+                seqNo: this.stringifyPaperValue(item?.seqNo || index + 1),
+                orcid: this.stringifyPaperValue(item?.orcid),
+                researcherId: this.stringifyPaperValue(item?.researcherId),
+                reprint: Boolean(item?.reprint)
+            };
+        }).filter(item => item.fullName);
+    }
+
+    buildTempAuthorsFromPaper(paper) {
+        const authorEntries = this.normalizeAuthorEntries(paper?.authorEntries || paper?.authorsDetailed);
+        if (authorEntries.length) {
+            return authorEntries.map(item => ({
+                name: item.fullName,
+                affiliation: item.affiliationText || '',
+                affiliations: item.affiliations.slice(),
+                orcid: item.orcid || '',
+                researcherId: item.researcherId || '',
+                seqNo: item.seqNo || '',
+                reprint: item.reprint === true
+            }));
+        }
+        const names = this.normalizePaperListValue(paper?.authors);
+        const affiliations = this.normalizePaperListValue(paper?.authorAffiliations);
+        return names.map((name, index) => ({
+            name,
+            affiliation: affiliations[index] || '',
+            affiliations: affiliations[index] ? [affiliations[index]] : []
+        }));
     }
 
     hasMultipleAuthorAffiliations(paper) {
@@ -1496,10 +1543,21 @@ class FormFillingSidebar {
         canonical.title = this.resolveCanonicalTitle(base, enriched);
         canonical.authors = pickList(base.authors, enriched.authors);
         canonical.authorAffiliations = pickList(enriched.authorAffiliations, base.authorAffiliations);
+        canonical.authorEntries = Array.isArray(enriched.authorEntries) && enriched.authorEntries.length
+            ? enriched.authorEntries
+            : (Array.isArray(enriched.authorsDetailed) && enriched.authorsDetailed.length
+                ? enriched.authorsDetailed
+                : (Array.isArray(base.authorEntries) && base.authorEntries.length
+                    ? base.authorEntries
+                    : (Array.isArray(base.authorsDetailed) && base.authorsDetailed.length ? base.authorsDetailed : [])));
+        canonical.organizations = Array.isArray(enriched.organizations) && enriched.organizations.length
+            ? enriched.organizations
+            : (Array.isArray(base.organizations) ? base.organizations : []);
         canonical.year = pickString(base.year, enriched.year);
         canonical.url = pickString(base.url, enriched.url);
         canonical.source = pickString(enriched.source, base.source);
         canonical.documentType = pickString(enriched.documentType, base.documentType);
+        canonical.publicationType = pickString(enriched.publicationType, base.publicationType);
         canonical.paperType = this.inferCanonicalPaperType({ ...base, ...enriched, ...canonical });
 
         canonical.venue = pickString(enriched.venue, base.venue);
@@ -1513,20 +1571,36 @@ class FormFillingSidebar {
         canonical.citationCount = enriched.citationCount != null ? enriched.citationCount : base.citationCount;
         canonical.funding = Array.isArray(enriched.funding) ? enriched.funding : (Array.isArray(base.funding) ? base.funding : []);
         canonical.grants = Array.isArray(enriched.grants) ? enriched.grants : (Array.isArray(base.grants) ? base.grants : []);
+        canonical.fundingText = pickString(enriched.fundingText, base.fundingText);
         canonical.indexing = pickList(enriched.indexing, base.indexing, enriched.indexings, base.indexings, enriched.indexedBy, base.indexedBy);
         canonical.notes = pickString(enriched.notes, enriched.note, base.notes, base.note);
         canonical.articleNumber = pickString(enriched.articleNumber, base.articleNumber);
+        canonical.identifiers = enriched.identifiers || base.identifiers || {};
+        canonical.issn = pickString(enriched.issn, base.issn);
+        canonical.eissn = pickString(enriched.eissn, base.eissn);
         canonical.firstPage = pickString(enriched.firstPage, base.firstPage);
         canonical.lastPage = pickString(enriched.lastPage, base.lastPage);
         canonical.pageRange = pickString(enriched.pageRange, base.pageRange);
+        canonical.pageCount = pickString(enriched.pageCount, base.pageCount);
         canonical.publicationDate = pickString(enriched.publicationDate, base.publicationDate);
         canonical.publicationMonth = pickString(enriched.publicationMonth, base.publicationMonth);
         canonical.publicationDay = pickString(enriched.publicationDay, base.publicationDay);
+        canonical.earlyAccessDate = pickString(enriched.earlyAccessDate, base.earlyAccessDate);
+        canonical.earlyAccessYear = pickString(enriched.earlyAccessYear, base.earlyAccessYear);
+        canonical.earlyAccessMonth = pickString(enriched.earlyAccessMonth, base.earlyAccessMonth);
+        canonical.earlyAccessDay = pickString(enriched.earlyAccessDay, base.earlyAccessDay);
         canonical.volume = pickString(enriched.volume, base.volume);
         canonical.issue = pickString(enriched.issue, base.issue);
         canonical.language = this.normalizeLanguageLabel(pickString(enriched.language, base.language, this.guessLanguageFromTitle(canonical.title)));
         canonical.openAccessPdf = enriched.openAccessPdf || base.openAccessPdf || '';
         canonical.wosUid = pickString(enriched.wosUid, base.wosUid);
+        canonical.publisher = enriched.publisher || base.publisher || null;
+        canonical.subjectCategories = Array.isArray(enriched.subjectCategories) && enriched.subjectCategories.length
+            ? enriched.subjectCategories
+            : (Array.isArray(base.subjectCategories) ? base.subjectCategories : []);
+        canonical.citationTopics = enriched.citationTopics || base.citationTopics || null;
+        canonical.usageStats = enriched.usageStats || base.usageStats || null;
+        canonical.dataAvailabilityStatement = pickString(enriched.dataAvailabilityStatement, base.dataAvailabilityStatement);
 
         if (this.isConferencePaperType(canonical)) {
             canonical.conferenceName = pickString(enriched.conferenceName, enriched.conferenceTitle, base.conferenceName, base.conferenceTitle);
@@ -1563,6 +1637,7 @@ class FormFillingSidebar {
         const context = {};
         const volumeIssue = [paper.volume || '', paper.issue ? `(${paper.issue})` : ''].join('').trim();
         const authorAffiliations = this.normalizePaperListValue(paper.authorAffiliations);
+        const authorEntries = this.buildTempAuthorsFromPaper(paper);
         const push = (key, label, answer, fieldType = 'text') => {
             const normalized = this.stringifyPaperValue(answer);
             if (!normalized) return;
@@ -1573,6 +1648,9 @@ class FormFillingSidebar {
         push('论文作者', '论文作者', this.normalizePaperListValue(paper.authors).join(', '));
         if (authorAffiliations.length === 1) {
             push('作者机构', '作者机构', authorAffiliations[0]);
+        }
+        if (authorEntries.length === 1 && authorEntries[0].affiliation) {
+            push('作者机构', '作者机构', authorEntries[0].affiliation);
         }
         push('期刊/会议', '期刊/会议', paper.venueFormatted || paper.venue);
         push('期刊/会议(原始)', '期刊/会议(原始)', paper.venueRaw || paper.venue);
@@ -1586,23 +1664,28 @@ class FormFillingSidebar {
         push('关键词', '关键词', this.normalizePaperListValue(paper.keywords).join('；'));
         push('引用次数', '引用次数', paper.citationCount != null ? String(paper.citationCount) : '');
         push('基金/资助', '基金/资助', this.formatFundingInfo(paper.funding || paper.grants));
+        push('基金原文', '基金原文', paper.fundingText);
         push('文章号/编码', '文章号/编码', paper.articleNumber);
         push('起始页码', '起始页码', paper.firstPage);
         push('终止页码', '终止页码', paper.lastPage);
         push('页码', '页码', paper.pageRange);
         push('页码范围', '页码范围', paper.pageRange);
+        push('页数', '页数', paper.pageCount);
         push('卷/期', '卷/期', volumeIssue);
         push('卷号', '卷号', paper.volume);
         push('期号', '期号', paper.issue);
         push('发表日期', '发表日期', paper.publicationDate);
         push('发表月份', '发表月份', paper.publicationMonth);
         push('发表日', '发表日', paper.publicationDay);
+        push('在线首发日期', '在线首发日期', paper.earlyAccessDate);
         push('文章语言', '文章语言', this.normalizeLanguageLabel(paper.language));
         push('语言', '语言', this.normalizeLanguageLabel(paper.language));
         push('收录情况', '收录情况', this.normalizePaperListValue(paper.indexing).join('；'));
         push('备注', '备注', paper.notes);
         push('作者检索词', '作者检索词', this.currentAuthor);
         push('数据来源', '数据来源', paper.source || this.currentSource || '');
+        push('ISSN', 'ISSN', paper.issn);
+        push('eISSN', 'eISSN', paper.eissn);
 
         if (this.isConferencePaperType(paper)) {
             push('会议名称', '会议名称', paper.conferenceName || paper.conferenceTitle);
@@ -1662,6 +1745,7 @@ class FormFillingSidebar {
     syncSelectedPaperToAgentCache() {
         if (!this.formFillingAgent || !this.selectedPaper) return;
         const authorAffiliations = this.normalizePaperListValue(this.selectedPaper.authorAffiliations);
+        const authorEntries = this.buildTempAuthorsFromPaper(this.selectedPaper);
         if (this._tempAuthors && this._tempAuthors.length > 0) {
             this.formFillingAgent.discoveryCache._current_paper_authors = this._tempAuthors;
         }
@@ -1685,6 +1769,9 @@ class FormFillingSidebar {
         }
         if (authorAffiliations.length > 1) {
             this.formFillingAgent.discoveryCache[`_author_affiliations_list_for_${title}`] = authorAffiliations;
+        }
+        if (authorEntries.length) {
+            this.formFillingAgent.discoveryCache[`_author_entries_for_${title}`] = authorEntries;
         }
         if (this.selectedPaper.indexing && this.selectedPaper.indexing.length) {
             this.formFillingAgent.discoveryCache[`_indexing_for_${title}`] = this.normalizePaperListValue(this.selectedPaper.indexing).join('；');
@@ -1809,9 +1896,9 @@ class FormFillingSidebar {
                     merged[key] = details[key];
                 }
             };
-            const baseKeys = ['title', 'authors', 'authorAffiliations', 'venue', 'year', 'doi', 'url', 'source'];
+            const baseKeys = ['title', 'authors', 'authorAffiliations', 'authorEntries', 'organizations', 'venue', 'year', 'doi', 'url', 'source'];
             for (const key of baseKeys) copyField(key);
-            for (const key of ['abstract', 'citationCount', 'articleNumber', 'firstPage', 'lastPage', 'pageRange', 'publicationDate', 'publicationMonth', 'publicationDay', 'conferenceEventDate', 'conferenceStartDate', 'conferenceEndDate', 'conferenceStartMonth', 'conferenceStartDay', 'conferenceEndMonth', 'conferenceEndDay', 'language', 'conferenceName', 'conferenceTitle', 'conferenceLocation', 'volume', 'issue', 'wosUid', 'documentType']) {
+            for (const key of ['abstract', 'citationCount', 'articleNumber', 'identifiers', 'issn', 'eissn', 'pageCount', 'firstPage', 'lastPage', 'pageRange', 'publicationDate', 'publicationMonth', 'publicationDay', 'earlyAccessDate', 'earlyAccessYear', 'earlyAccessMonth', 'earlyAccessDay', 'conferenceEventDate', 'conferenceStartDate', 'conferenceEndDate', 'conferenceStartMonth', 'conferenceStartDay', 'conferenceEndMonth', 'conferenceEndDay', 'language', 'conferenceName', 'conferenceTitle', 'conferenceLocation', 'volume', 'issue', 'wosUid', 'documentType', 'publicationType', 'publisher', 'citationTopics', 'usageStats', 'dataAvailabilityStatement', 'fundingText']) {
                 copyField(key);
             }
             if (Array.isArray(details.keywords) && details.keywords.length) {
@@ -1822,6 +1909,9 @@ class FormFillingSidebar {
             }
             if (Array.isArray(details.funding) && details.funding.length && (!Array.isArray(merged.funding) || merged.funding.length === 0 || !preferExisting)) {
                 merged.funding = details.funding;
+            }
+            if (Array.isArray(details.subjectCategories) && details.subjectCategories.length && (!Array.isArray(merged.subjectCategories) || merged.subjectCategories.length === 0 || !preferExisting)) {
+                merged.subjectCategories = details.subjectCategories;
             }
             if (details.openAccessPdf && (!merged.openAccessPdf || !preferExisting)) merged.openAccessPdf = details.openAccessPdf;
         };
@@ -1898,13 +1988,7 @@ class FormFillingSidebar {
         this.selectedPaper.paperType = this.inferCanonicalPaperType(this.selectedPaper);
         this.selectedPaper.language = this.normalizeLanguageLabel(this.selectedPaper.language);
 
-        window.__tempAuthors = (this.selectedPaper.authors || []).map((name, index) => {
-            let affiliation = '';
-            if (this.selectedPaper.authorAffiliations && this.selectedPaper.authorAffiliations[index]) {
-                affiliation = this.selectedPaper.authorAffiliations[index];
-            }
-            return { name, affiliation };
-        });
+        window.__tempAuthors = this.buildTempAuthorsFromPaper(this.selectedPaper);
         this._tempAuthors = window.__tempAuthors;
         console.log('✅ 已保存作者列表到 window.__tempAuthors:', window.__tempAuthors);
         console.groupCollapsed('[SelectedPaper] 规范化结果');
