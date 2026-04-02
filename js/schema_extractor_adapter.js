@@ -74,6 +74,13 @@ function normalizeText(value) {
     return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function looksLikeInstructionText(text) {
+    const normalized = normalizeText(text);
+    if (!normalized) return false;
+    return /(只限填写|仅限填写|多个.*分号|分号隔开|如无|格式|填写说明|填写要求|请填写|请输入|填“无”|填'无')/.test(normalized)
+        || (/[，。；;:：]/.test(normalized) && normalized.length >= 12);
+}
+
 function cleanLabelText(text) {
     const normalized = normalizeText(String(text || '').replace(/[*：:]+$/g, ''));
     if (!normalized) return '';
@@ -320,8 +327,8 @@ function pickBestLabel(candidates) {
     if (!uniq.length) return '';
 
     uniq.sort((a, b) => {
-        const aScore = (a.length <= 20 ? 3 : 0) + (a.length <= 8 ? 2 : 0) - (ACTION_TEXT_PATTERN.test(a) ? 10 : 0);
-        const bScore = (b.length <= 20 ? 3 : 0) + (b.length <= 8 ? 2 : 0) - (ACTION_TEXT_PATTERN.test(b) ? 10 : 0);
+        const aScore = (a.length <= 20 ? 3 : 0) + (a.length <= 8 ? 2 : 0) - (ACTION_TEXT_PATTERN.test(a) ? 10 : 0) - (looksLikeInstructionText(a) ? 12 : 0);
+        const bScore = (b.length <= 20 ? 3 : 0) + (b.length <= 8 ? 2 : 0) - (ACTION_TEXT_PATTERN.test(b) ? 10 : 0) - (looksLikeInstructionText(b) ? 12 : 0);
         return bScore - aScore || a.length - b.length;
     });
 
@@ -343,6 +350,28 @@ function extractBlockLabel(block) {
     }
 
     return pickBestLabel(getDirectTextCandidates(block));
+}
+
+function extractBlockDescription(block, controls = [], blockLabel = '') {
+    const optionTexts = new Set(
+        controls
+            .map(control => normalizeText(control.closest('label')?.textContent || control.getAttribute('aria-label') || control.value || ''))
+            .filter(Boolean)
+    );
+
+    const descriptions = [];
+    Array.from(block.querySelectorAll('*')).forEach(element => {
+        if (element.matches(CONTROL_SELECTOR)) return;
+        if (element.querySelector(CONTROL_SELECTOR)) return;
+
+        const text = normalizeText(element.textContent || '');
+        if (!text || text === blockLabel) return;
+        if (optionTexts.has(text)) return;
+        if (!looksLikeInstructionText(text)) return;
+        descriptions.push(text);
+    });
+
+    return Array.from(new Set(descriptions)).sort((a, b) => b.length - a.length)[0] || '';
 }
 
 function scoreBlockCandidate(candidate, root, depth) {
@@ -491,7 +520,7 @@ function buildChoiceField(doc, block, controls, fieldType, blockLabel, fallbackI
         options,
         selector: buildCssPath(block),
         xpath: '',
-        description: '',
+        description: extractBlockDescription(block, controls, blockLabel),
         source: 'schema-extractor',
         multiple: fieldType === 'checkbox'
     };
@@ -520,7 +549,7 @@ function buildScalarField(doc, control, blockLabel, fallbackIndex) {
         options,
         selector: buildCssPath(control),
         xpath: '',
-        description: '',
+        description: extractBlockDescription(control.parentElement || control, [control], blockLabel),
         source: 'schema-extractor',
         multiple: control.multiple === true
     };

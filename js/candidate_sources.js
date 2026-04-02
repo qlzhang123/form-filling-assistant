@@ -8,7 +8,7 @@ export const CANDIDATE_SOURCE_MAP = {
     'paper.language': ['paper.language'],
     'paper.type': ['paper.type'],
     'paper.presentationType': ['paper.presentationType'],
-    'paper.funding': ['paper.fundingText'],
+    'paper.funding': ['paper.fundingItems', 'paper.fundingIds', 'paper.fundingText'],
     'paper.url': ['paper.url'],
 
     'author.names': ['authors.namesText'],

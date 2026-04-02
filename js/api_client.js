@@ -90,7 +90,7 @@ const getStoredWosApiKey = () => {
 };
 
 const WOS_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const WOS_CACHE_VERSION = 4;
+const WOS_CACHE_VERSION = 5;
 
 const getWosCacheKey = (doi) => `_wos_cache_${normalizeDoi(doi).toLowerCase()}`;
 
@@ -1245,11 +1245,43 @@ const extractWosCitationCount = (record) => {
     return Number.isFinite(parsed) ? parsed : null;
 };
 
+const extractWosEditions = (record) => {
+    const editionEntries = collectNestedArray(record, ['static_data.summary.EWUID.edition']);
+    const editionRaw = dedupeTextList(
+        editionEntries
+            .map(entry => firstNonEmptyString(entry?.value, entry?.content, entry))
+            .filter(Boolean)
+    );
+
+    const editionMap = {
+        'WOS.SCI': 'SCIE',
+        'WOS.SSCI': 'SSCI',
+        'WOS.AHCI': 'AHCI',
+        'WOS.ESCI': 'ESCI',
+        'WOS.ISTP': 'ISTP',
+        'WOS.ISSHP': 'ISSHP',
+        'WOS.BKCI': 'BKCI'
+    };
+
+    const indexedIn = dedupeTextList(
+        editionRaw.map(value => {
+            const key = String(value || '').trim().toUpperCase();
+            return editionMap[key] || key.replace(/^WOS\./, '');
+        }).filter(Boolean)
+    );
+
+    return { editionRaw, indexedIn };
+};
+
 const extractWosFunding = (fullMeta) => {
     const grants = collectNestedArray(fullMeta, ['fund_ack.grants.grant', 'fund_ack.grant'])
         .map(item => ({
             funder: firstNonEmptyString(item.grant_agency, item.agency, item.funder_name),
-            agencyNames: dedupeTextList(ensureArray(item.grant_agency_names?.grant_agency_name).map(entry => firstNonEmptyString(entry.content, entry.value, entry))),
+            agencyNames: dedupeTextList(
+                collectNestedArray(item, ['grant_agency_names.grant_agency_name', 'grant_agency_names'])
+                    .map(entry => firstNonEmptyString(entry?.content, entry?.value, entry))
+                    .filter(Boolean)
+            ),
             awardId: firstNonEmptyString(item.grant_ids?.grant_id, item.grant_id, item.award_id, item.grantId)
         }))
         .filter(item => item.funder || item.agencyNames.length || item.awardId);
@@ -1359,6 +1391,7 @@ const normalizeWosRecord = (record, doi) => {
     const subjectCategories = extractWosSubjects(fullMeta);
     const citationTopics = extractWosCitationTopics(record);
     const usageStats = extractWosUsageStats(record);
+    const editionInfo = extractWosEditions(record);
     const publisher = extractWosPublisher(summary);
     const venue = firstNonEmptyString(
         chooseBestWosVenue(sourceTitles),
@@ -1403,6 +1436,9 @@ const normalizeWosRecord = (record, doi) => {
         fundingText: fundingInfo.fundingText,
         grants: fundingInfo.grants,
         funding: fundingInfo.grants,
+        editionRaw: editionInfo.editionRaw,
+        indexedIn: editionInfo.indexedIn,
+        indexing: editionInfo.indexedIn,
         articleNumber: firstNonEmptyString(identifiers.articleNumber, pubInfo.article_no, pubInfo.article_number),
         identifiers: identifiers.identifiers,
         issn: identifiers.issn,

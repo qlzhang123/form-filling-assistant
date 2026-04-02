@@ -3,6 +3,99 @@ import { FIELD_ALIASES } from './field_aliases.js';
 import { CANDIDATE_SOURCE_MAP } from './candidate_sources.js';
 import { flattenTextValue, normalizeSemanticText, splitList, coerceDateParts, validateValueByType } from './validators.js';
 
+function stripMarkup(value) {
+    return String(value || '')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p>/gi, '\n')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function extractIdentifierTokens(value) {
+    const text = stripMarkup(flattenTextValue(value));
+    if (!text) return [];
+    const matches = text.match(/\b[A-Za-z]*\d[A-Za-z0-9-]*\b/g) || [];
+    return Array.from(new Set(matches.filter(item => /\d/.test(item) && item.length >= 4)));
+}
+
+const SEMANTIC_SCOPE_ALIASES = [
+    {
+        canonical: 'nsfc',
+        aliases: ['国家自然科学基金', '国家自然科学基金委员会', 'national natural science foundation of china', 'nsfc']
+    },
+    {
+        canonical: 'miit',
+        aliases: ['工业和信息化部', '工信部', 'ministry of industry and information technology', 'miit', 'miit china program']
+    }
+];
+
+function extractSemanticScopeConcepts(value) {
+    const normalized = normalizeSemanticText(value);
+    const concepts = new Set();
+    if (!normalized) return concepts;
+    for (const group of SEMANTIC_SCOPE_ALIASES) {
+        const matched = (group.aliases || []).some(alias => {
+            const token = normalizeSemanticText(alias);
+            return token && normalized.includes(token);
+        });
+        if (matched) concepts.add(group.canonical);
+    }
+    return concepts;
+}
+
+function inferHintConstraints(field) {
+    const label = stripMarkup(field?.label || '');
+    const placeholder = stripMarkup(field?.placeholder || '');
+    const description = stripMarkup(field?.description || '');
+    const text = [label, placeholder, description].filter(Boolean).join(' ');
+
+    const scopeMatch = text.match(/(?:只限填写|仅填写|仅限填写|填写)(.+?)(?:项目)?(?:批准号|编号|号码|号)/);
+    const emptyMatch = text.match(/如无[^“"'‘’]*[“"'‘’]([^”"'‘’]+)[”"'‘’]/);
+
+    return {
+        multiValue: /多个|多项|多条|分号|;|；/.test(text),
+        separator: /分号|;|；/.test(text) ? '；' : '；',
+        extractIdentifierOnly: /(批准号|项目编号|项目号|基金号|资助号|grant\s*(id|no|number)|award\s*(id|no|number))/i.test(text),
+        scopePhrase: scopeMatch ? scopeMatch[1].replace(/[“"'‘’]/g, '').trim() : '',
+        emptyFallback: emptyMatch ? emptyMatch[1].trim() : '',
+        plainTextOnly: /只限填写|仅填写|仅限填写|填写/.test(text),
+        hintText: text
+    };
+}
+
+function scopeMatches(text, scopePhrase) {
+    if (!scopePhrase) return true;
+    const textNorm = normalizeSemanticText(text);
+    const scopeNorm = normalizeSemanticText(scopePhrase);
+    if (!scopeNorm) return true;
+    if (textNorm.includes(scopeNorm)) return true;
+
+    const textConcepts = extractSemanticScopeConcepts(text);
+    const scopeConcepts = extractSemanticScopeConcepts(scopePhrase);
+    if (!textConcepts.size || !scopeConcepts.size) return false;
+    for (const concept of scopeConcepts) {
+        if (textConcepts.has(concept)) return true;
+    }
+    return false;
+}
+
+const SEMANTIC_TYPE_COMPATIBILITY = {
+    funding_text: ['funding_text', 'funding_item', 'identifier_list'],
+    indexing_list: ['indexing_list', 'text'],
+    keyword_list: ['keyword_list', 'text'],
+    organization_list: ['organization_list', 'organization_or_person']
+};
+
+function getSemanticCompatibilityScore(expectedType, actualType) {
+    if (expectedType === actualType) return 1;
+    const compatibles = SEMANTIC_TYPE_COMPATIBILITY[expectedType] || [];
+    if (compatibles.includes(actualType)) return 0.82;
+    return 0;
+}
+
 class DateResolver {
     buildDateView(rawValue, fallbackYear = '') {
         const parts = coerceDateParts(rawValue);
@@ -47,6 +140,20 @@ class FactNormalizer {
             return [flattenTextValue(item.funder), flattenTextValue(item.agency), flattenTextValue(item.awardId), flattenTextValue(item.award_id), flattenTextValue(item.grantId), flattenTextValue(item.grant_id)].filter(Boolean).join(' / ');
         }).filter(Boolean).join('；');
     }
+    extractFundingIds(value) {
+        const items = Array.isArray(value) ? value : [value];
+        return Array.from(new Set(items.flatMap(item => {
+            if (!item) return [];
+            if (typeof item !== 'object') return extractIdentifierTokens(item);
+            return []
+                .concat(extractIdentifierTokens(item.awardId))
+                .concat(extractIdentifierTokens(item.award_id))
+                .concat(extractIdentifierTokens(item.grantId))
+                .concat(extractIdentifierTokens(item.grant_id))
+                .concat(extractIdentifierTokens(item.grantIds))
+                .concat(extractIdentifierTokens(item.grant_ids));
+        }).filter(Boolean)));
+    }
     normalize({ paper, filledContext = {}, discoveryCache = {} }) {
         const base = paper || {};
         const authorEntries = (Array.isArray(base.authorEntries) ? base.authorEntries : []).map((entry, index) => {
@@ -76,15 +183,17 @@ class FactNormalizer {
         const conferenceEnd = this.dateResolver.buildDateView(base.conferenceEndDate, base.year || '');
         const paperType = this.inferDocumentType(base);
         const isConferencePaper = paperType === '会议论文';
-        const fundingText = flattenTextValue(base.fundingText) || this.flattenFunding(base.funding || base.grants);
-        const indexing = splitList(base.indexing || base.indexings || base.indexedBy);
+        const fundingItems = Array.isArray(base.funding) ? base.funding : (Array.isArray(base.grants) ? base.grants : []);
+        const fundingText = stripMarkup(base.fundingText || '') || this.flattenFunding(fundingItems);
+        const fundingIds = this.extractFundingIds(fundingItems);
+        const indexing = splitList(base.indexing || base.indexings || base.indexedBy || base.indexedIn);
         const notesText = flattenTextValue(base.notes || base.note);
         const facts = {
             paper: {
                 title: flattenTextValue(base.title), doi: flattenTextValue(base.doi), abstract: flattenTextValue(base.abstract), keywords,
                 keywordsText: keywords.join('；'), citationCount: base.citationCount != null ? String(base.citationCount).trim() : '',
                 url: flattenTextValue(base.url), language: this.normalizeLanguage(base.language, base.title), type: paperType,
-                presentationType: flattenTextValue(base.presentationType), fundingText
+                presentationType: flattenTextValue(base.presentationType), fundingItems, fundingText, fundingIds
             },
             publication: {
                 venue: flattenTextValue(base.venueFormatted || base.venue), venueRaw: flattenTextValue(base.venueRaw || base.venue), venueShort: flattenTextValue(base.venueShort),
@@ -131,7 +240,9 @@ class FactNormalizer {
         push('paper.language', facts.paper.language, 'language');
         push('paper.type', facts.paper.type, 'document_type');
         push('paper.presentationType', facts.paper.presentationType, 'presentation_type');
+        push('paper.fundingItems', facts.paper.fundingItems, 'funding_item');
         push('paper.fundingText', facts.paper.fundingText, 'funding_text');
+        push('paper.fundingIds', facts.paper.fundingIds, 'identifier_list');
         push('publication.venue', facts.publication.venue, 'venue_name');
         push('publication.venueRaw', facts.publication.venueRaw, 'venue_name');
         push('publication.venueShort', facts.publication.venueShort, 'short_name');
@@ -227,11 +338,19 @@ class FieldSemanticClassifier {
     }
     buildConstraints(field, fieldType, hasOptions, textMap) {
         const joined = `${textMap.label} ${textMap.name} ${textMap.placeholder} ${textMap.description}`;
+        const hintConstraints = inferHintConstraints(field);
         return {
             allowOverwrite: false,
             mustMatchOption: hasOptions,
             fieldType,
             requiredFormat: fieldType === 'url' ? 'url' : '',
+            multiValue: hintConstraints.multiValue || fieldType === 'checkbox' || field?.multiple === true,
+            separator: hintConstraints.separator,
+            extractIdentifierOnly: hintConstraints.extractIdentifierOnly,
+            scopePhrase: hintConstraints.scopePhrase,
+            emptyFallback: hintConstraints.emptyFallback,
+            plainTextOnly: hintConstraints.plainTextOnly,
+            hintText: hintConstraints.hintText,
             forbiddenKinds: [
                 (joined.includes(normalizeSemanticText('地点')) || joined.includes(normalizeSemanticText('地址'))) ? 'event_name' : '',
                 (joined.includes(normalizeSemanticText('地点')) || joined.includes(normalizeSemanticText('地址'))) ? 'organization_or_person' : '',
@@ -281,15 +400,30 @@ class ConstraintPlanner {
         this.autoFillThreshold = 0.88;
         this.llmRanker = new LLMRanker(llmClient);
         this.choiceLexicon = {
-            中文: ['中文', 'Chinese', 'zh'], 英文: ['英文', 'English', 'en', '外文'], 会议论文: ['会议论文', 'conference paper', 'inproceedings', 'proceedings'],
-            期刊论文: ['期刊论文', 'journal article', 'article', 'journal'], 学位论文: ['学位论文', 'thesis'], 技术报告: ['技术报告', 'technical report', 'tech report'],
-            数据集: ['数据集', 'dataset'], 专利: ['专利', 'patent'], 著作章节: ['著作章节', 'book chapter', 'chapter'], 预印本: ['预印本', 'preprint'],
-            开放获取: ['开放获取', 'open access', 'oa'], 非开放获取: ['非开放获取', 'closed access']
+            中文: ['中文', 'Chinese', 'zh'],
+            英文: ['英文', 'English', 'en', '外文'],
+            会议论文: ['会议论文', 'conference paper', 'inproceedings', 'proceedings'],
+            期刊论文: ['期刊论文', 'journal article', 'article', 'journal'],
+            学位论文: ['学位论文', 'thesis'],
+            技术报告: ['技术报告', 'technical report', 'tech report'],
+            数据集: ['数据集', 'dataset'],
+            专利: ['专利', 'patent'],
+            著作章节: ['著作章节', 'book chapter', 'chapter'],
+            预印本: ['预印本', 'preprint'],
+            开放获取: ['开放获取', 'open access', 'oa'],
+            非开放获取: ['非开放获取', 'closed access'],
+            SCIE: ['SCIE', 'SCI', 'WOS.SCI'],
+            SSCI: ['SSCI', 'WOS.SSCI'],
+            EI: ['EI'],
+            CSSCI: ['CSSCI'],
+            ISTP: ['ISTP', 'CPCI', 'WOS.ISTP']
         };
     }
     getCandidatePaths(intent) { return CANDIDATE_SOURCE_MAP[intent.semanticKey] || CANDIDATE_SOURCE_MAP[`${intent.domain}.${intent.role}`] || []; }
     expandFactRecord(record) {
-        if (Array.isArray(record.value) && record.semanticType === 'indexing_list') return [{ ...record, value: record.value }];
+        if (Array.isArray(record.value) && (record.semanticType === 'indexing_list' || record.semanticType === 'identifier_list')) {
+            return [{ ...record, value: record.value }];
+        }
         if (Array.isArray(record.value)) return record.value.map(value => ({ ...record, value }));
         return [{ ...record, value: record.value }];
     }
@@ -360,7 +494,7 @@ class ConstraintPlanner {
     }
     scoreCandidate(intent, candidate) {
         let score = 0.48;
-        if (candidate.semanticType === intent.expectedValueType) score += 0.22;
+        score += 0.22 * getSemanticCompatibilityScore(intent.expectedValueType, candidate.semanticType);
         if (intent.domain === 'conference' && candidate.path.startsWith('conference.')) score += 0.2;
         if (intent.domain === 'publication' && candidate.path.startsWith('publication.')) score += 0.2;
         if (intent.domain === 'paper' && candidate.path.startsWith('paper.')) score += 0.2;
@@ -382,6 +516,51 @@ class ConstraintPlanner {
         }
         return candidates.sort((a, b) => b.score - a.score);
     }
+    shapeCandidateValue(intent, candidate) {
+        const constraints = intent.constraints || {};
+        const value = candidate?.value;
+
+        if (constraints.extractIdentifierOnly) {
+            const items = Array.isArray(value) ? value : [value];
+            const ids = Array.from(new Set(items.flatMap(item => {
+                if (!item) return [];
+                if (typeof item === 'object' && !Array.isArray(item)) {
+                    const scopeText = [
+                        item.funder,
+                        item.agency,
+                        item.grantAgency,
+                        item.grant_agency,
+                        item.agencyNames,
+                        item.grantAgencyNames
+                    ].map(entry => flattenTextValue(entry)).join(' ');
+                    if (!scopeMatches(scopeText, constraints.scopePhrase)) return [];
+                    return []
+                        .concat(extractIdentifierTokens(item.awardId))
+                        .concat(extractIdentifierTokens(item.award_id))
+                        .concat(extractIdentifierTokens(item.grantId))
+                        .concat(extractIdentifierTokens(item.grant_id))
+                        .concat(extractIdentifierTokens(item.grantIds))
+                        .concat(extractIdentifierTokens(item.grant_ids));
+                }
+                if (!scopeMatches(item, constraints.scopePhrase)) return [];
+                return extractIdentifierTokens(item);
+            }).filter(Boolean)));
+
+            if (ids.length) {
+                return constraints.multiValue ? ids : ids[0];
+            }
+            return constraints.emptyFallback || '';
+        }
+
+        if (Array.isArray(value)) {
+            const list = value.map(item => stripMarkup(flattenTextValue(item))).filter(Boolean);
+            return constraints.multiValue ? list : (list[0] || '');
+        }
+
+        const plain = stripMarkup(flattenTextValue(value));
+        if (!plain) return constraints.emptyFallback || '';
+        return plain;
+    }
     buildDeferredPlan(intent, reason, needsHuman = false) {
         return { fieldName: intent.fieldName, fieldLabel: intent.label, proposedValue: '', fillValue: '', sourceFactKeys: [], confidence: 0, reason, needsApi: false, needsHuman, deferred: true, semantics: intent };
     }
@@ -391,13 +570,36 @@ class ConstraintPlanner {
         if (intent.domain === 'paper' && intent.role === 'presentationType') return this.buildDeferredPlan(intent, '展示或报告类别需要基于页面选项人工确认', true);
         if (intent.domain === 'author' && intent.role === 'affiliations' && Array.isArray(facts.authors?.affiliations) && facts.authors.affiliations.length > 1) return this.buildDeferredPlan(intent, '作者单位是多值结构，保留给作者表格或逐字段流程处理', true);
         const candidates = this.collectCandidates(intent, facts);
-        if (!candidates.length) return this.buildDeferredPlan(intent, '没有找到满足约束的候选事实', true);
+        if (!candidates.length) {
+            if (intent.constraints?.emptyFallback) {
+                return {
+                    fieldName: intent.fieldName,
+                    fieldLabel: intent.label,
+                    proposedValue: intent.constraints.emptyFallback,
+                    fillValue: intent.constraints.emptyFallback,
+                    sourceFactKeys: [],
+                    confidence: 0.9,
+                    reason: '按字段说明使用缺省值',
+                    needsApi: false,
+                    needsHuman: false,
+                    deferred: false,
+                    semantics: intent
+                };
+            }
+            return this.buildDeferredPlan(intent, '没有找到满足约束的候选事实', true);
+        }
         const topCandidates = candidates.slice(0, 3);
         const resolvedCandidate = topCandidates.length > 1 && Math.abs(topCandidates[0].score - topCandidates[1].score) < 0.08 ? await this.llmRanker.rank(intent, topCandidates) : topCandidates[0];
         if (!resolvedCandidate || resolvedCandidate.needsHuman) return this.buildDeferredPlan(intent, resolvedCandidate?.reason || '候选冲突，等待人工确认', true);
-        let fillValue = resolvedCandidate.value;
+        let fillValue = this.shapeCandidateValue(intent, resolvedCandidate);
         let proposedValue = Array.isArray(fillValue) ? fillValue.map(item => flattenTextValue(item)).filter(Boolean).join('；') : flattenTextValue(fillValue);
         let confidence = resolvedCandidate.score;
+        if (!proposedValue && intent.constraints?.emptyFallback) {
+            fillValue = intent.constraints.emptyFallback;
+            proposedValue = intent.constraints.emptyFallback;
+            confidence = Math.max(confidence, 0.9);
+        }
+        if (!proposedValue) return this.buildDeferredPlan(intent, '候选值经字段约束处理后为空', true);
         if (intent.hasOptions) {
             const matched = this.matchOptions(intent, fillValue);
             if (!matched) return this.buildDeferredPlan(intent, '候选值未命中字段真实选项', true);

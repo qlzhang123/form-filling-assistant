@@ -1386,7 +1386,9 @@ class FormFillingSidebar {
     prepareFieldValueForWrite(field, value) {
         const fieldType = String(field?.type || 'text').toLowerCase();
         if (fieldType === 'checkbox') {
-            const list = Array.isArray(value) ? value : [value];
+            const list = Array.isArray(value)
+                ? value
+                : String(value || '').split(/[;；,\n]+/).map(item => item.trim()).filter(Boolean);
             return list
                 .map(item => this.stringifyPaperValue(item))
                 .filter(Boolean);
@@ -1572,7 +1574,9 @@ class FormFillingSidebar {
         canonical.funding = Array.isArray(enriched.funding) ? enriched.funding : (Array.isArray(base.funding) ? base.funding : []);
         canonical.grants = Array.isArray(enriched.grants) ? enriched.grants : (Array.isArray(base.grants) ? base.grants : []);
         canonical.fundingText = pickString(enriched.fundingText, base.fundingText);
-        canonical.indexing = pickList(enriched.indexing, base.indexing, enriched.indexings, base.indexings, enriched.indexedBy, base.indexedBy);
+        canonical.indexedIn = pickList(enriched.indexedIn, enriched.indexing, base.indexedIn, base.indexing, enriched.indexings, base.indexings, enriched.indexedBy, base.indexedBy);
+        canonical.indexing = canonical.indexedIn;
+        canonical.editionRaw = pickList(enriched.editionRaw, base.editionRaw);
         canonical.notes = pickString(enriched.notes, enriched.note, base.notes, base.note);
         canonical.articleNumber = pickString(enriched.articleNumber, base.articleNumber);
         canonical.identifiers = enriched.identifiers || base.identifiers || {};
@@ -1680,7 +1684,7 @@ class FormFillingSidebar {
         push('在线首发日期', '在线首发日期', paper.earlyAccessDate);
         push('文章语言', '文章语言', this.normalizeLanguageLabel(paper.language));
         push('语言', '语言', this.normalizeLanguageLabel(paper.language));
-        push('收录情况', '收录情况', this.normalizePaperListValue(paper.indexing).join('；'));
+        push('收录情况', '收录情况', this.normalizePaperListValue(paper.indexing || paper.indexedIn).join('；'));
         push('备注', '备注', paper.notes);
         push('作者检索词', '作者检索词', this.currentAuthor);
         push('数据来源', '数据来源', paper.source || this.currentSource || '');
@@ -1773,8 +1777,9 @@ class FormFillingSidebar {
         if (authorEntries.length) {
             this.formFillingAgent.discoveryCache[`_author_entries_for_${title}`] = authorEntries;
         }
-        if (this.selectedPaper.indexing && this.selectedPaper.indexing.length) {
-            this.formFillingAgent.discoveryCache[`_indexing_for_${title}`] = this.normalizePaperListValue(this.selectedPaper.indexing).join('；');
+        const indexingList = this.normalizePaperListValue(this.selectedPaper.indexing || this.selectedPaper.indexedIn);
+        if (indexingList.length) {
+            this.formFillingAgent.discoveryCache[`_indexing_for_${title}`] = indexingList.join('；');
         }
         if (this.selectedPaper.notes) {
             this.formFillingAgent.discoveryCache[`_notes_for_${title}`] = this.stringifyPaperValue(this.selectedPaper.notes);
@@ -1900,6 +1905,15 @@ class FormFillingSidebar {
             for (const key of baseKeys) copyField(key);
             for (const key of ['abstract', 'citationCount', 'articleNumber', 'identifiers', 'issn', 'eissn', 'pageCount', 'firstPage', 'lastPage', 'pageRange', 'publicationDate', 'publicationMonth', 'publicationDay', 'earlyAccessDate', 'earlyAccessYear', 'earlyAccessMonth', 'earlyAccessDay', 'conferenceEventDate', 'conferenceStartDate', 'conferenceEndDate', 'conferenceStartMonth', 'conferenceStartDay', 'conferenceEndMonth', 'conferenceEndDay', 'language', 'conferenceName', 'conferenceTitle', 'conferenceLocation', 'volume', 'issue', 'wosUid', 'documentType', 'publicationType', 'publisher', 'citationTopics', 'usageStats', 'dataAvailabilityStatement', 'fundingText']) {
                 copyField(key);
+            }
+            if (Array.isArray(details.indexedIn) && details.indexedIn.length && (!Array.isArray(merged.indexedIn) || merged.indexedIn.length === 0 || !preferExisting)) {
+                merged.indexedIn = details.indexedIn;
+            }
+            if (Array.isArray(details.indexing) && details.indexing.length && (!Array.isArray(merged.indexing) || merged.indexing.length === 0 || !preferExisting)) {
+                merged.indexing = details.indexing;
+            }
+            if (Array.isArray(details.editionRaw) && details.editionRaw.length && (!Array.isArray(merged.editionRaw) || merged.editionRaw.length === 0 || !preferExisting)) {
+                merged.editionRaw = details.editionRaw;
             }
             if (Array.isArray(details.keywords) && details.keywords.length) {
                 merged.keywords = Array.from(new Set([...(merged.keywords || []), ...details.keywords])).filter(Boolean);

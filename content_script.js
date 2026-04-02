@@ -546,7 +546,9 @@ class FormFillingContentScript {
                 }
             } else if (type === 'checkbox' || type === 'radio') {
                 let matched = false;
-                const requestedValues = Array.isArray(value) ? value : [value];
+                const requestedValues = Array.isArray(value)
+                    ? value
+                    : String(value || '').split(/[;；,\n]+/).map(item => item.trim()).filter(Boolean);
 
                 const getCandidates = (values) => {
                     const arr = [];
