@@ -659,7 +659,7 @@ class EnhancedToolExecutor {
 
     async fillFormField(params) {
         try {
-            let fieldName, value, tabId;
+            let fieldName, value, tabId, fieldSelector;
             if (typeof params === 'string') {
                 const parts = params.split(',').map(p => p.trim());
                 if (parts.length >= 2) {
@@ -670,7 +670,7 @@ class EnhancedToolExecutor {
                     value = '';
                 }
             } else {
-                ({ fieldName, value, tabId } = params);
+                ({ fieldName, value, tabId, fieldSelector } = params);
             }
             if (typeof chrome !== 'undefined' && chrome.scripting) {
                 if (!tabId) {
@@ -684,7 +684,7 @@ class EnhancedToolExecutor {
                 }
                 const results = await chrome.scripting.executeScript({
                     target: { tabId: tabId },
-                    func: (fieldName, value) => {
+                    func: (fieldName, value, fieldSelector) => {
                         const normalize = (s) => {
                             if (s == null) return '';
                             const t = String(s).trim().toLowerCase();
@@ -745,6 +745,35 @@ class EnhancedToolExecutor {
                             const s = String(v || '');
                             return s.split(/[;,；、|]/).map(i => i.trim()).filter(i => i);
                         };
+                        const hasNegativeSemantic = (raw) => /^(非|不|无|未|not\b|non\b|no\b|closed\b)/i.test(String(raw || '').trim().toLowerCase());
+                        const stripNegativeSemantic = (raw) => String(raw || '').trim().toLowerCase()
+                            .replace(/^(非|不|无|未)+/, '')
+                            .replace(/^(?:not|non|no|closed)\s*/i, '')
+                            .trim();
+                        const scoreSemanticMatch = (left, right) => {
+                            const leftNorm = normalize(left);
+                            const rightNorm = normalize(right);
+                            if (!leftNorm || !rightNorm) return 0;
+                            if (leftNorm === rightNorm) return 1;
+
+                            const leftNegative = hasNegativeSemantic(left);
+                            const rightNegative = hasNegativeSemantic(right);
+                            const leftCore = normalize(stripNegativeSemantic(left));
+                            const rightCore = normalize(stripNegativeSemantic(right));
+
+                            if (leftCore && rightCore && leftCore === rightCore && leftNegative !== rightNegative) {
+                                return 0;
+                            }
+
+                            if (leftCore && rightCore && leftNegative === rightNegative) {
+                                if (leftCore === rightCore) return 0.96;
+                                if (leftCore.includes(rightCore) || rightCore.includes(leftCore)) return 0.84;
+                            }
+
+                            if (leftNegative !== rightNegative) return 0;
+                            if (leftNorm.includes(rightNorm) || rightNorm.includes(leftNorm)) return 0.72;
+                            return 0;
+                        };
                         const getLabelText = (el) => {
                             if (!el) return '';
                             const lab = el.labels && el.labels.length ? el.labels[0] : null;
@@ -759,10 +788,8 @@ class EnhancedToolExecutor {
                             const ov = option.value != null ? String(option.value) : '';
                             for (const t of targets) {
                                 if (!t) continue;
-                                if (normalize(ov) === normalize(t)) return true;
-                                if (normalize(ot) === normalize(t)) return true;
-                                if (normalize(ot).includes(normalize(t))) return true;
-                                if (normalize(t).includes(normalize(ot))) return true;
+                                if (scoreSemanticMatch(ov, t) >= 0.8) return true;
+                                if (scoreSemanticMatch(ot, t) >= 0.8) return true;
                             }
                             return false;
                         };
@@ -770,9 +797,7 @@ class EnhancedToolExecutor {
                             const targets = [String(target), mapEnZh(target)];
                             for (const t of targets) {
                                 if (!t) continue;
-                                if (normalize(labelText) === normalize(t)) return true;
-                                if (normalize(labelText).includes(normalize(t))) return true;
-                                if (normalize(t).includes(normalize(labelText))) return true;
+                                if (scoreSemanticMatch(labelText, t) >= 0.8) return true;
                             }
                             return false;
                         };
@@ -804,12 +829,10 @@ class EnhancedToolExecutor {
                         const tryClickSelectOption = (rawValue) => {
                             const targets = [String(rawValue), mapEnZh(rawValue)];
                             const options = collectDropdownOptions();
-                            const matches = (opt, t) => {
-                                const tt = normalize(opt.text);
-                                const tv = normalize(opt.value);
-                                const tx = normalize(t);
-                                return (tv && (tv === tx || tv.includes(tx) || tx.includes(tv))) || (tt && (tt === tx || tt.includes(tx) || tx.includes(tt)));
-                            };
+                            const matches = (opt, t) => Math.max(
+                                scoreSemanticMatch(opt.text, t),
+                                scoreSemanticMatch(opt.value, t)
+                            ) >= 0.8;
                             let chosen = null;
                             for (const t of targets) {
                                 chosen = options.find(o => matches(o, t));
@@ -831,7 +854,27 @@ class EnhancedToolExecutor {
                             }
                             return null;
                         };
-                        let field = document.querySelector(`[name="${fieldName}"]`) ||
+                        const resolveScopedField = (selector) => {
+                            const raw = String(selector || '').trim();
+                            if (!raw) return null;
+                            try {
+                                if (raw.startsWith('/')) {
+                                    const node = document.evaluate(raw, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                                    if (!node) return null;
+                                    if (node.matches && node.matches('input, select, textarea')) return node;
+                                    return node.querySelector ? node.querySelector('input, select, textarea') : null;
+                                }
+                                const matches = Array.from(document.querySelectorAll(raw));
+                                for (const el of matches) {
+                                    if (el.matches && el.matches('input, select, textarea')) return el;
+                                    const nested = el.querySelector ? el.querySelector('input, select, textarea') : null;
+                                    if (nested) return nested;
+                                }
+                            } catch (_) {}
+                            return null;
+                        };
+                        let field = resolveScopedField(fieldSelector) ||
+                                   document.querySelector(`[name="${fieldName}"]`) ||
                                    document.querySelector(`#${fieldName}`) ||
                                    document.querySelector(`input[name="${fieldName}"]`) ||
                                    document.querySelector(`select[name="${fieldName}"]`) ||
@@ -1016,7 +1059,7 @@ class EnhancedToolExecutor {
                         }
                         return { success: false, message: `未找到字段 "${fieldName}"` };
                     },
-                    args: [fieldName, value]
+                    args: [fieldName, value, fieldSelector || '']
                 });
                 return results && results[0]?.result ? results[0].result : { success: false, message: '执行脚本未返回有效结果' };
             } else {
@@ -1045,6 +1088,10 @@ class EnhancedToolExecutor {
 
     async getPageElements(selector = 'form input, form select, form textarea') {
         try {
+            if (selector && typeof selector === 'object') {
+                selector = selector.selector || 'form input, form select, form textarea';
+            }
+            selector = String(selector || 'form input, form select, form textarea');
             let elements;
             if (typeof chrome !== 'undefined' && chrome.scripting) {
                 let tabId = null;
@@ -1092,19 +1139,23 @@ class EnhancedToolExecutor {
                             };
 
                             // 解析选择器，提取可能的标签文本或 name 值
+                            const rawSelector = typeof sel === 'object' && sel !== null
+                                ? String(sel.selector || '')
+                                : String(sel || '');
+
                             let targetLabel = '';
                             let targetName = '';
                             // 1. 如果选择器是纯文本（不含 CSS 特殊字符），视为标签文本
-                            if (/^[a-zA-Z\u4e00-\u9fa5\s]+$/.test(sel)) {
-                                targetLabel = sel.trim();
+                            if (/^[a-zA-Z\u4e00-\u9fa5\s]+$/.test(rawSelector)) {
+                                targetLabel = rawSelector.trim();
                             } else {
                                 // 2. 尝试提取 name 属性值
-                                const nameMatch = sel.match(/name=['"]([^'"]+)['"]/);
+                                const nameMatch = rawSelector.match(/name=['"]([^'"]+)['"]/);
                                 if (nameMatch) {
                                     targetName = nameMatch[1];
                                 } else {
                                     // 3. 去除 CSS 符号，保留中英文作为标签候选
-                                    const plain = sel.replace(/[^a-zA-Z\u4e00-\u9fa5]/g, '');
+                                    const plain = rawSelector.replace(/[^a-zA-Z\u4e00-\u9fa5]/g, '');
                                     if (plain) targetLabel = plain;
                                 }
                             }
@@ -1113,7 +1164,7 @@ class EnhancedToolExecutor {
 
                             // 1. 直接使用原始选择器查找
                             try {
-                                elements = Array.from(document.querySelectorAll(sel));
+                                elements = Array.from(document.querySelectorAll(rawSelector));
                             } catch(e) {}
 
                             // 2. 如果未找到且选择器看起来像 name 属性，直接按 name 查找
@@ -1129,7 +1180,7 @@ class EnhancedToolExecutor {
                             }
 
                             // 4. 兜底：如果是通用选择器，返回所有可见表单元素
-                            if (elements.length === 0 && (sel === 'form input, form select, form textarea' || sel === 'input, select, textarea')) {
+                            if (elements.length === 0 && (rawSelector === 'form input, form select, form textarea' || rawSelector === 'input, select, textarea')) {
                                 elements = Array.from(document.querySelectorAll('input:not([type="hidden"]), select, textarea'));
                             }
 
@@ -1156,9 +1207,13 @@ class EnhancedToolExecutor {
                                     id: el.id,
                                     name: el.name,
                                     type: el.type,
+                                    className: el.className || '',
                                     placeholder: el.placeholder,
                                     value: el.value,
                                     required: el.required,
+                                    title: el.title || '',
+                                    ariaLabel: el.getAttribute('aria-label') || '',
+                                    textContent: (el.textContent || '').trim(),
                                     label: (() => {
                                         if (el.id) {
                                             const label = document.querySelector(`label[for="${el.id}"]`);
@@ -1258,22 +1313,26 @@ class EnhancedToolExecutor {
             return null;
         };
 
+        const rawSelector = typeof selector === 'object' && selector !== null
+            ? String(selector.selector || '')
+            : String(selector || '');
+
         let targetLabel = '';
         let targetName = '';
-        if (/^[a-zA-Z\u4e00-\u9fa5\s]+$/.test(selector)) {
-            targetLabel = selector.trim();
+        if (/^[a-zA-Z\u4e00-\u9fa5\s]+$/.test(rawSelector)) {
+            targetLabel = rawSelector.trim();
         } else {
-            const nameMatch = selector.match(/name=['"]([^'"]+)['"]/);
+            const nameMatch = rawSelector.match(/name=['"]([^'"]+)['"]/);
             if (nameMatch) targetName = nameMatch[1];
             else {
-                const plain = selector.replace(/[^a-zA-Z\u4e00-\u9fa5]/g, '');
+                const plain = rawSelector.replace(/[^a-zA-Z\u4e00-\u9fa5]/g, '');
                 if (plain) targetLabel = plain;
             }
         }
 
         let elements = [];
         try {
-            elements = Array.from(document.querySelectorAll(selector));
+            elements = Array.from(document.querySelectorAll(rawSelector));
         } catch(e) {}
 
         if (elements.length === 0 && targetName) {
@@ -1286,7 +1345,7 @@ class EnhancedToolExecutor {
             if (found) elements = [found];
         }
 
-        if (elements.length === 0 && (selector === 'form input, form select, form textarea' || selector === 'input, select, textarea')) {
+        if (elements.length === 0 && (rawSelector === 'form input, form select, form textarea' || rawSelector === 'input, select, textarea')) {
             elements = Array.from(document.querySelectorAll('input:not([type="hidden"]), select, textarea'));
         }
 
@@ -1311,9 +1370,13 @@ class EnhancedToolExecutor {
                 id: el.id,
                 name: el.name,
                 type: el.type,
+                className: el.className || '',
                 placeholder: el.placeholder,
                 value: el.value,
                 required: el.required,
+                title: el.title || '',
+                ariaLabel: el.getAttribute('aria-label') || '',
+                textContent: (el.textContent || '').trim(),
                 label: (() => {
                     if (el.id) {
                         const label = document.querySelector(`label[for="${el.id}"]`);

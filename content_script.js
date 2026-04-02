@@ -223,6 +223,35 @@ class FormFillingContentScript {
             };
 
             const waitFor = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+            const hasNegativeSemantic = (raw) => /^(非|不|无|未|not\b|non\b|no\b|closed\b)/i.test(String(raw || '').trim().toLowerCase());
+            const stripNegativeSemantic = (raw) => String(raw || '').trim().toLowerCase()
+                .replace(/^(非|不|无|未)+/, '')
+                .replace(/^(?:not|non|no|closed)\s*/i, '')
+                .trim();
+            const scoreSemanticMatch = (left, right) => {
+                const leftNorm = normalize(left);
+                const rightNorm = normalize(right);
+                if (!leftNorm || !rightNorm) return 0;
+                if (leftNorm === rightNorm) return 1;
+
+                const leftNegative = hasNegativeSemantic(left);
+                const rightNegative = hasNegativeSemantic(right);
+                const leftCore = normalize(stripNegativeSemantic(left));
+                const rightCore = normalize(stripNegativeSemantic(right));
+
+                if (leftCore && rightCore && leftCore === rightCore && leftNegative !== rightNegative) {
+                    return 0;
+                }
+
+                if (leftCore && rightCore && leftNegative === rightNegative) {
+                    if (leftCore === rightCore) return 0.96;
+                    if (leftCore.includes(rightCore) || rightCore.includes(leftCore)) return 0.84;
+                }
+
+                if (leftNegative !== rightNegative) return 0;
+                if (leftNorm.includes(rightNorm) || rightNorm.includes(leftNorm)) return 0.72;
+                return 0;
+            };
 
             const parseFieldHints = (name) => {
                 const raw = String(name || '');
@@ -357,7 +386,7 @@ class FormFillingContentScript {
                 const options = Array.from(selectEl.querySelectorAll('option'));
 
                 const byValue = (v) => options.find(o => String(o.value) === String(v));
-                const byText = (v) => options.find(o => normalize(o.textContent).includes(normalize(v)));
+                const byText = (v) => options.find(o => scoreSemanticMatch(o.textContent, v) >= 0.8);
 
                 let chosen = null;
                 for (const c of candidates) {
@@ -425,10 +454,10 @@ class FormFillingContentScript {
                 }
 
                 const match = (opt, c) => {
-                    const t = normalize(opt.text);
-                    const v = normalize(opt.value);
-                    const x = normalize(c);
-                    return (v && (v === x || v.includes(x) || x.includes(v))) || (t && (t === x || t.includes(x) || x.includes(t)));
+                    return Math.max(
+                        scoreSemanticMatch(opt.text, c),
+                        scoreSemanticMatch(opt.value, c)
+                    ) >= 0.8;
                 };
 
                 let chosen = null;
@@ -558,7 +587,16 @@ class FormFillingContentScript {
                         'chinese': ['中文', 'Chinese'],
                         'zh': ['中文', 'Chinese'],
                         'yes': ['是', 'Yes'],
-                        'no': ['否', 'No']
+                        'no': ['否', 'No'],
+                        'openaccess': ['开放获取', '开放获取(OA)论文出版物', 'OA'],
+                        'oa': ['开放获取', '开放获取(OA)论文出版物', 'OA'],
+                        'closedaccess': ['非开放获取', '非开放获取论文出版物'],
+                        'nonopenaccess': ['非开放获取', '非开放获取论文出版物'],
+                        'scie': ['SCIE'],
+                        'ssci': ['SSCI'],
+                        'ei': ['EI'],
+                        'cssci': ['CSSCI'],
+                        'istp': ['ISTP']
                     };
                     values.forEach(item => {
                         const raw = String(item || '').trim();
@@ -571,11 +609,8 @@ class FormFillingContentScript {
                 };
 
                 const matchLabel = (labelText, candidates) => {
-                    const lt = normalize(labelText);
                     for (const c of candidates) {
-                        const ct = normalize(c);
-                        if (!ct) continue;
-                        if (lt === ct || lt.includes(ct) || ct.includes(lt)) return true;
+                        if (scoreSemanticMatch(labelText, c) >= 0.8) return true;
                     }
                     return false;
                 };

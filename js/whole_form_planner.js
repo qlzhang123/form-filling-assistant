@@ -82,6 +82,96 @@ function scopeMatches(text, scopePhrase) {
     return false;
 }
 
+function hasNegativeSemantic(value) {
+    const raw = stripMarkup(flattenTextValue(value)).trim().toLowerCase();
+    if (!raw) return false;
+    return /^(非|不|无|未|not\b|non\b|no\b|closed\b)/i.test(raw);
+}
+
+function stripNegativeSemantic(value) {
+    const raw = stripMarkup(flattenTextValue(value)).trim().toLowerCase();
+    if (!raw) return '';
+    return raw
+        .replace(/^(非|不|无|未)+/, '')
+        .replace(/^(?:not|non|no|closed)\s*/i, '')
+        .trim();
+}
+
+function scoreSemanticChoiceMatch(left, right) {
+    const leftNorm = normalizeSemanticText(left);
+    const rightNorm = normalizeSemanticText(right);
+    if (!leftNorm || !rightNorm) return 0;
+    if (leftNorm === rightNorm) return 1;
+
+    const leftNegative = hasNegativeSemantic(left);
+    const rightNegative = hasNegativeSemantic(right);
+    const leftCore = normalizeSemanticText(stripNegativeSemantic(left));
+    const rightCore = normalizeSemanticText(stripNegativeSemantic(right));
+
+    if (leftCore && rightCore && leftCore === rightCore && leftNegative !== rightNegative) {
+        return 0;
+    }
+
+    if (leftCore && rightCore && leftNegative === rightNegative) {
+        if (leftCore === rightCore) return 0.96;
+        if (leftCore.includes(rightCore) || rightCore.includes(leftCore)) return 0.84;
+    }
+
+    if (leftNegative !== rightNegative) return 0;
+    if (leftNorm.includes(rightNorm) || rightNorm.includes(leftNorm)) return 0.72;
+    return 0;
+}
+
+function collectScopedIdentifierTokens(value, scopePhrase = '') {
+    const items = Array.isArray(value) ? value : [value];
+    return Array.from(new Set(items.flatMap(item => {
+        if (!item) return [];
+
+        const directTokens = [];
+        let scopeText = '';
+        let fallbackText = '';
+
+        if (typeof item === 'object' && !Array.isArray(item)) {
+            scopeText = [
+                item.funder,
+                item.agency,
+                item.grantAgency,
+                item.grant_agency,
+                item.agencyNames,
+                item.grantAgencyNames
+            ].map(entry => flattenTextValue(entry)).join(' ');
+
+            directTokens.push(
+                ...extractIdentifierTokens(item.awardId),
+                ...extractIdentifierTokens(item.award_id),
+                ...extractIdentifierTokens(item.grantId),
+                ...extractIdentifierTokens(item.grant_id),
+                ...extractIdentifierTokens(item.grantIds),
+                ...extractIdentifierTokens(item.grant_ids)
+            );
+
+            fallbackText = [
+                item.funder,
+                item.agency,
+                item.awardId,
+                item.award_id,
+                item.grantId,
+                item.grant_id,
+                item.grantIds,
+                item.grant_ids,
+                item.agencyNames,
+                item.grantAgencyNames
+            ].map(entry => flattenTextValue(entry)).join(' ');
+        } else {
+            scopeText = flattenTextValue(item);
+            fallbackText = flattenTextValue(item);
+        }
+
+        if (!scopeMatches(scopeText || fallbackText, scopePhrase)) return [];
+        return Array.from(new Set([...directTokens, ...extractIdentifierTokens(fallbackText)]));
+    }).filter(Boolean)));
+}
+
 const SEMANTIC_TYPE_COMPATIBILITY = {
     funding_text: ['funding_text', 'funding_item', 'identifier_list'],
     indexing_list: ['indexing_list', 'text'],
@@ -456,14 +546,12 @@ class ConstraintPlanner {
         return splitList(value).map(item => this.normalizeChoiceValue(item)).filter(Boolean);
     }
     scoreOption(option, candidate) {
-        const optionText = normalizeSemanticText(option.text || option.value || '');
-        const optionValue = normalizeSemanticText(option.value || '');
-        const target = normalizeSemanticText(candidate);
-        if (!target) return 0;
-        if (optionText === target || optionValue === target) return 1;
-        if (optionText && (optionText.includes(target) || target.includes(optionText))) return 0.82;
-        if (optionValue && (optionValue.includes(target) || target.includes(optionValue))) return 0.75;
-        return 0;
+        const optionText = option.text || option.value || '';
+        const optionValue = option.value || '';
+        return Math.max(
+            scoreSemanticChoiceMatch(optionText, candidate),
+            scoreSemanticChoiceMatch(optionValue, candidate)
+        );
     }
     resolveOptionWriteValue(intent, option) {
         if (intent.type === 'checkbox' || intent.type === 'radio') return option.text || option.value || '';
@@ -521,30 +609,7 @@ class ConstraintPlanner {
         const value = candidate?.value;
 
         if (constraints.extractIdentifierOnly) {
-            const items = Array.isArray(value) ? value : [value];
-            const ids = Array.from(new Set(items.flatMap(item => {
-                if (!item) return [];
-                if (typeof item === 'object' && !Array.isArray(item)) {
-                    const scopeText = [
-                        item.funder,
-                        item.agency,
-                        item.grantAgency,
-                        item.grant_agency,
-                        item.agencyNames,
-                        item.grantAgencyNames
-                    ].map(entry => flattenTextValue(entry)).join(' ');
-                    if (!scopeMatches(scopeText, constraints.scopePhrase)) return [];
-                    return []
-                        .concat(extractIdentifierTokens(item.awardId))
-                        .concat(extractIdentifierTokens(item.award_id))
-                        .concat(extractIdentifierTokens(item.grantId))
-                        .concat(extractIdentifierTokens(item.grant_id))
-                        .concat(extractIdentifierTokens(item.grantIds))
-                        .concat(extractIdentifierTokens(item.grant_ids));
-                }
-                if (!scopeMatches(item, constraints.scopePhrase)) return [];
-                return extractIdentifierTokens(item);
-            }).filter(Boolean)));
+            const ids = collectScopedIdentifierTokens(value, constraints.scopePhrase);
 
             if (ids.length) {
                 return constraints.multiValue ? ids : ids[0];

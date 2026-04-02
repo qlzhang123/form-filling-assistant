@@ -742,7 +742,7 @@ ${JSON.stringify(fieldInfo, null, 2)}
         try {
             const result = await this.toolExecutor.execute(
                 'FillFormField',
-                { fieldName: field.name, value, tabId: this.formTabId },
+                { fieldName: field.name, value, fieldSelector: field.selector || field.xpath || '', tabId: this.formTabId },
                 { tabId: this.formTabId }
             );
             return result; // 假设 result 有 success 字段
@@ -780,7 +780,10 @@ ${JSON.stringify(fieldInfo, null, 2)}
                     const rowFields = inputs.elements.map(el => ({
                         field: { 
                             name: el.name || el.id,  // 优先使用 name，若空则用 id
-                            type: el.type 
+                            type: el.type,
+                            selector: el.xpath || '',
+                            xpath: el.xpath || '',
+                            placeholder: el.placeholder || ''
                         },
                         label: el.label || ''  // GetPageElements 返回的每个元素已包含 label 字段
                     }));
@@ -1327,8 +1330,524 @@ Options[选项1 | 选项2]
         return filledContextText;
     }
 
+    normalizeAuthorAffiliationValue(author) {
+        if (!author || typeof author !== 'object') return '';
+        if (Array.isArray(author.affiliations) && author.affiliations.length > 0) {
+            return author.affiliations.map(item => String(item || '').trim()).filter(Boolean).join('；');
+        }
+        return String(author.affiliation || '').trim();
+    }
 
-    
+    normalizeAuthorTableFieldText(fieldLike) {
+        const raw = [
+            fieldLike?.label,
+            fieldLike?.field?.label,
+            fieldLike?.field?.name,
+            fieldLike?.field?.placeholder,
+            fieldLike?.field?.type
+        ].filter(Boolean).join(' ');
+        return String(raw || '')
+            .toLowerCase()
+            .replace(/\s+/g, '')
+            .replace(/[:：*]/g, '');
+    }
+
+    scoreAuthorRowField(fieldLike, role) {
+        const text = this.normalizeAuthorTableFieldText(fieldLike);
+        const type = String(fieldLike?.field?.type || '').toLowerCase();
+        if (!text) return -1000;
+
+        const roleRules = {
+            name: {
+                positive: ['姓名', '作者', 'name', 'author'],
+                negative: ['单位', '机构', 'affiliation', 'organization', 'email', '邮箱', 'orcid', 'researcherid', '本人']
+            },
+            affiliation: {
+                positive: ['单位', '机构', 'affiliation', 'organization', 'institution', 'school', 'college', 'department', '工作单位'],
+                negative: ['姓名', '作者', 'name', 'author', 'email', '邮箱', 'orcid', 'researcherid', '本人']
+            }
+        };
+
+        const rules = roleRules[role];
+        if (!rules) return -1000;
+
+        let score = 0;
+        if (type === 'text' || type === 'textarea' || type === 'search') score += 8;
+        if (type === 'radio' || type === 'checkbox' || type === 'hidden') score -= 50;
+
+        for (const token of rules.positive) {
+            const normalizedToken = token.toLowerCase().replace(/\s+/g, '');
+            if (text.includes(normalizedToken)) score += 20;
+        }
+        for (const token of rules.negative) {
+            const normalizedToken = token.toLowerCase().replace(/\s+/g, '');
+            if (text.includes(normalizedToken)) score -= 18;
+        }
+
+        return score;
+    }
+
+    resolveAuthorRowBinding(rowFields) {
+        const candidates = Array.isArray(rowFields) ? rowFields : [];
+        const textInputs = candidates.filter(item => {
+            const type = String(item?.field?.type || '').toLowerCase();
+            return !['hidden', 'button', 'submit', 'radio', 'checkbox'].includes(type);
+        });
+
+        const pickBest = (role) => {
+            const scored = textInputs
+                .map((item, index) => ({ item, index, score: this.scoreAuthorRowField(item, role) }))
+                .sort((a, b) => b.score - a.score || a.index - b.index);
+            return scored[0]?.item?.field || null;
+        };
+
+        let nameField = pickBest('name');
+        let affiliationField = pickBest('affiliation');
+
+        if (!nameField && textInputs[0]) {
+            nameField = textInputs[0].field;
+        }
+        if ((!affiliationField || (nameField && affiliationField.name === nameField.name && affiliationField.selector === nameField.selector)) && textInputs.length > 1) {
+            const fallback = textInputs.find(item => item.field !== nameField);
+            affiliationField = fallback?.field || affiliationField;
+        }
+
+        return { nameField, affiliationField };
+    }
+
+    async ensureAuthorTableRows(targetCount, indent = '') {
+        let rows = await this.getTableRows();
+        let attempts = 0;
+
+        while (rows.length < targetCount && attempts < 10) {
+            const added = await this.clickAddButton();
+            if (!added) break;
+            await this.delay(500);
+            rows = await this.getTableRows();
+            attempts++;
+        }
+
+        console.log(`${indent}当前识别到 ${rows.length} 行作者表格`);
+        return rows;
+    }
+
+    async processTable(node, depth, siblings) {
+        const indent = '  '.repeat(depth);
+        console.log(`\n${indent}📊 开始批量处理表格: ${node.label}`);
+
+        let authors = this.discoveryCache._current_paper_authors || [];
+        if ((!authors || authors.length === 0) && typeof window !== 'undefined' && window.__tempAuthors) {
+            console.log(`${indent}从 window.__tempAuthors 恢复作者信息`);
+            authors = window.__tempAuthors;
+            this.discoveryCache._current_paper_authors = authors;
+        }
+
+        if (!Array.isArray(authors) || authors.length === 0) {
+            console.log(`${indent}⚠️ 未找到作者信息，跳过表格`);
+            return;
+        }
+
+        console.log(`${indent}📋 需要填写 ${authors.length} 位作者:`, authors.map(a => a.name).join(', '));
+
+        let rows = await this.ensureAuthorTableRows(authors.length, indent);
+        if (!rows.length) {
+            console.log(`${indent}⚠️ 未能识别作者表格行`);
+            return;
+        }
+
+        for (let index = 0; index < authors.length; index++) {
+            const author = authors[index];
+            rows = await this.ensureAuthorTableRows(index + 1, indent);
+            const rowFields = rows[index] || [];
+            const binding = this.resolveAuthorRowBinding(rowFields);
+
+            if (!binding.nameField) {
+                console.log(`${indent}⚠️ 第 ${index + 1} 行未识别到姓名输入框`);
+                return;
+            }
+
+            const nameResult = await this.fillFieldValue(binding.nameField, author.name);
+            if (!nameResult || !nameResult.success) {
+                console.log(`${indent}⚠️ 第 ${index + 1} 行作者姓名填写失败`);
+                return;
+            }
+
+            let affiliation = this.normalizeAuthorAffiliationValue(author);
+            if (!affiliation && author.name) {
+                try {
+                    const res = await this.toolExecutor.execute(
+                        'GetAuthorDetailsSemanticScholar',
+                        author.name,
+                        { discoveryCache: this.discoveryCache, tabId: this.formTabId }
+                    );
+                    if (res.success && res.data && res.data.affiliations) {
+                        affiliation = Array.isArray(res.data.affiliations)
+                            ? res.data.affiliations.join('；')
+                            : String(res.data.affiliations || '').trim();
+                    }
+                } catch (e) {
+                    console.warn(`获取作者 ${author.name} 单位失败`, e);
+                }
+            }
+
+            if (affiliation && binding.affiliationField) {
+                const affResult = await this.fillFieldValue(binding.affiliationField, affiliation);
+                if (!affResult || !affResult.success) {
+                    console.log(`${indent}⚠️ 第 ${index + 1} 行作者单位填写失败`);
+                    return;
+                }
+            }
+        }
+
+        console.log(`${indent}表格处理完成`);
+    }
+
+    normalizeAuthorAffiliationValue(author) {
+        if (!author || typeof author !== 'object') return '';
+        if (Array.isArray(author.affiliations) && author.affiliations.length > 0) {
+            return author.affiliations.map(item => String(item || '').trim()).filter(Boolean).join('\uff1b');
+        }
+        return String(author.affiliation || '').trim();
+    }
+
+    normalizeAuthorTableFieldText(fieldLike) {
+        const raw = [
+            fieldLike?.label,
+            fieldLike?.field?.label,
+            fieldLike?.field?.name,
+            fieldLike?.field?.placeholder,
+            fieldLike?.field?.type
+        ].filter(Boolean).join(' ');
+        return String(raw || '')
+            .toLowerCase()
+            .replace(/\s+/g, '')
+            .replace(/[:\uFF1A*]/g, '');
+    }
+
+    scoreAuthorRowField(fieldLike, role) {
+        const text = this.normalizeAuthorTableFieldText(fieldLike);
+        const type = String(fieldLike?.field?.type || '').toLowerCase();
+        if (!text) return -1000;
+
+        const roleRules = {
+            name: {
+                positive: ['\u59d3\u540d', '\u4f5c\u8005', 'name', 'author'],
+                negative: ['\u5355\u4f4d', '\u673a\u6784', 'affiliation', 'organization', 'email', '\u90ae\u7bb1', 'orcid', 'researcherid', '\u672c\u4eba']
+            },
+            affiliation: {
+                positive: ['\u5355\u4f4d', '\u673a\u6784', 'affiliation', 'organization', 'institution', 'school', 'college', 'department', '\u5de5\u4f5c\u5355\u4f4d'],
+                negative: ['\u59d3\u540d', '\u4f5c\u8005', 'name', 'author', 'email', '\u90ae\u7bb1', 'orcid', 'researcherid', '\u672c\u4eba']
+            }
+        };
+
+        const rules = roleRules[role];
+        if (!rules) return -1000;
+
+        let score = 0;
+        if (type === 'text' || type === 'textarea' || type === 'search') score += 8;
+        if (type === 'radio' || type === 'checkbox' || type === 'hidden') score -= 50;
+
+        for (const token of rules.positive) {
+            const normalizedToken = token.toLowerCase().replace(/\s+/g, '');
+            if (text.includes(normalizedToken)) score += 20;
+        }
+        for (const token of rules.negative) {
+            const normalizedToken = token.toLowerCase().replace(/\s+/g, '');
+            if (text.includes(normalizedToken)) score -= 18;
+        }
+
+        return score;
+    }
+
+    resolveAuthorRowBinding(rowFields) {
+        const candidates = Array.isArray(rowFields) ? rowFields : [];
+        const textInputs = candidates.filter(item => {
+            const type = String(item?.field?.type || '').toLowerCase();
+            return !['hidden', 'button', 'submit', 'radio', 'checkbox'].includes(type);
+        });
+
+        const pickBest = (role) => {
+            const scored = textInputs
+                .map((item, index) => ({ item, index, score: this.scoreAuthorRowField(item, role) }))
+                .sort((a, b) => b.score - a.score || a.index - b.index);
+            return scored[0]?.item?.field || null;
+        };
+
+        let nameField = pickBest('name');
+        let affiliationField = pickBest('affiliation');
+
+        if (!nameField && textInputs[0]) {
+            nameField = textInputs[0].field;
+        }
+        if ((!affiliationField || (nameField && affiliationField.name === nameField.name && affiliationField.selector === nameField.selector)) && textInputs.length > 1) {
+            const fallback = textInputs.find(item => item.field !== nameField);
+            affiliationField = fallback?.field || affiliationField;
+        }
+
+        return { nameField, affiliationField };
+    }
+
+    async ensureAuthorTableRows(targetCount, indent = '') {
+        let rows = await this.getTableRows();
+        let attempts = 0;
+
+        while (rows.length < targetCount && attempts < 10) {
+            const added = await this.clickAddButton();
+            if (!added) break;
+            await this.delay(500);
+            rows = await this.getTableRows();
+            attempts++;
+        }
+
+        console.log(`${indent}当前识别到 ${rows.length} 行作者表格`);
+        return rows;
+    }
+
+    async processTable(node, depth, siblings) {
+        const indent = '  '.repeat(depth);
+        console.log(`\n${indent}📊 开始批量处理表格: ${node.label}`);
+
+        let authors = this.discoveryCache._current_paper_authors || [];
+        if ((!authors || authors.length === 0) && typeof window !== 'undefined' && window.__tempAuthors) {
+            console.log(`${indent}从 window.__tempAuthors 恢复作者信息`);
+            authors = window.__tempAuthors;
+            this.discoveryCache._current_paper_authors = authors;
+        }
+
+        if (!Array.isArray(authors) || authors.length === 0) {
+            console.log(`${indent}⚠️ 未找到作者信息，跳过表格`);
+            return;
+        }
+
+        console.log(`${indent}📋 需要填写 ${authors.length} 位作者:`, authors.map(a => a.name).join(', '));
+
+        let rows = await this.ensureAuthorTableRows(authors.length, indent);
+        if (!rows.length) {
+            console.log(`${indent}⚠️ 未能识别作者表格行`);
+            return;
+        }
+
+        for (let index = 0; index < authors.length; index++) {
+            const author = authors[index];
+            rows = await this.ensureAuthorTableRows(index + 1, indent);
+            const rowFields = rows[index] || [];
+            const binding = this.resolveAuthorRowBinding(rowFields);
+
+            if (!binding.nameField) {
+                console.log(`${indent}⚠️ 第 ${index + 1} 行未识别到姓名输入框`);
+                return;
+            }
+
+            const nameResult = await this.fillFieldValue(binding.nameField, author.name);
+            if (!nameResult || !nameResult.success) {
+                console.log(`${indent}⚠️ 第 ${index + 1} 行作者姓名填写失败`);
+                return;
+            }
+
+            let affiliation = this.normalizeAuthorAffiliationValue(author);
+            if (!affiliation && author.name) {
+                try {
+                    const res = await this.toolExecutor.execute(
+                        'GetAuthorDetailsSemanticScholar',
+                        author.name,
+                        { discoveryCache: this.discoveryCache, tabId: this.formTabId }
+                    );
+                    if (res.success && res.data && res.data.affiliations) {
+                        affiliation = Array.isArray(res.data.affiliations)
+                            ? res.data.affiliations.join('\uff1b')
+                            : String(res.data.affiliations || '').trim();
+                    }
+                } catch (e) {
+                    console.warn(`获取作者 ${author.name} 单位失败`, e);
+                }
+            }
+
+            if (affiliation && binding.affiliationField) {
+                const affResult = await this.fillFieldValue(binding.affiliationField, affiliation);
+                if (!affResult || !affResult.success) {
+                    console.log(`${indent}⚠️ 第 ${index + 1} 行作者单位填写失败`);
+                    return;
+                }
+            }
+        }
+
+        console.log(`${indent}表格处理完成`);
+    }
+
+    extractAuthorRowKey(xpath, index = 0) {
+        const raw = String(xpath || '');
+        const trMatch = raw.match(/^(.*?\/tr(?:\[\d+\])?)(?:\/|$)/i);
+        if (trMatch) return trMatch[1];
+
+        const tdMatch = raw.match(/^(.*?\/td(?:\[\d+\])?)(?:\/|$)/i);
+        if (tdMatch) return tdMatch[1];
+
+        const parts = raw.split('/').filter(Boolean);
+        if (parts.length >= 3) {
+            return '/' + parts.slice(0, -2).join('/');
+        }
+        return `__row_${index}`;
+    }
+
+    async getTableRows() {
+        const selectorCandidates = [
+            '#author-table tbody input, #author-table tbody select, #author-table tbody textarea',
+            '#author-table input, #author-table select, #author-table textarea',
+            '.author-table tbody input, .author-table tbody select, .author-table tbody textarea',
+            'table tbody input, table tbody select, table tbody textarea',
+            'table input, table select, table textarea'
+        ];
+
+        try {
+            let elements = [];
+            let matchedSelector = '';
+
+            for (const selector of selectorCandidates) {
+                const result = await this.toolExecutor.execute(
+                    'GetPageElements',
+                    selector,
+                    { tabId: this.formTabId }
+                );
+                if (result.success && Array.isArray(result.elements) && result.elements.length > 0) {
+                    elements = result.elements;
+                    matchedSelector = selector;
+                    break;
+                }
+            }
+
+            if (!elements.length) {
+                console.warn('未识别到作者表格输入控件');
+                return [];
+            }
+
+            console.log(`getTableRows 使用选择器 "${matchedSelector}" 获取到 ${elements.length} 个表格控件`);
+
+            const rowMap = new Map();
+            elements.forEach((el, index) => {
+                const rowKey = this.extractAuthorRowKey(el.xpath, index);
+                if (!rowMap.has(rowKey)) {
+                    rowMap.set(rowKey, []);
+                }
+
+                rowMap.get(rowKey).push({
+                    field: {
+                        name: el.name || el.id || '',
+                        type: el.type || el.tagName || 'text',
+                        selector: el.xpath || '',
+                        xpath: el.xpath || '',
+                        placeholder: el.placeholder || ''
+                    },
+                    label: el.label || el.ariaLabel || el.title || el.textContent || ''
+                });
+            });
+
+            return Array.from(rowMap.values()).filter(row => Array.isArray(row) && row.length > 0);
+        } catch (e) {
+            console.error('获取表格行失败:', e);
+            return [];
+        }
+    }
+
+    async getTableRowCount() {
+        try {
+            const rows = await this.getTableRows();
+            console.log(`getTableRowCount 识别到 ${rows.length} 行作者表格`);
+            return rows.length;
+        } catch (e) {
+            console.warn('获取表格行数失败', e);
+            return 0;
+        }
+    }
+
+    async clickAddButton() {
+        const positiveTokens = ['添加', '新增', '增加', '插入', '创建', 'add', 'append', 'insert', 'create', 'new', '+'];
+        const negativeTokens = ['删除', '移除', '上移', '下移', 'remove', 'delete', 'up', 'down', 'edit'];
+
+        const elementsResult = await this.toolExecutor.execute(
+            'GetPageElements',
+            'button, a, [role="button"], .action-btn',
+            { tabId: this.formTabId }
+        );
+
+        const scoreCandidate = (element) => {
+            const haystack = [
+                element.textContent,
+                element.label,
+                element.name,
+                element.id,
+                element.className,
+                element.title,
+                element.ariaLabel,
+                element.value
+            ].filter(Boolean).join(' ').toLowerCase();
+
+            if (!haystack) return -1000;
+
+            let score = 0;
+            for (const token of positiveTokens) {
+                if (haystack.includes(token.toLowerCase())) score += 20;
+            }
+            for (const token of negativeTokens) {
+                if (haystack.includes(token.toLowerCase())) score -= 30;
+            }
+            if ((element.tagName || '').toLowerCase() === 'button') score += 4;
+            if ((element.className || '').toLowerCase().includes('add')) score += 10;
+            if ((element.id || '').toLowerCase().includes('add')) score += 10;
+            return score;
+        };
+
+        const ranked = (elementsResult.success && Array.isArray(elementsResult.elements) ? elementsResult.elements : [])
+            .map(element => ({ element, score: scoreCandidate(element) }))
+            .filter(item => item.score > 0 && item.element.xpath)
+            .sort((a, b) => b.score - a.score);
+
+        for (const item of ranked) {
+            try {
+                const result = await this.toolExecutor.execute(
+                    'ClickElement',
+                    { selector: item.element.xpath, tabId: this.formTabId },
+                    { tabId: this.formTabId }
+                );
+                if (result.success) {
+                    console.log(`点击添加按钮成功: ${item.element.textContent || item.element.id || item.element.className || item.element.xpath}`);
+                    return true;
+                }
+            } catch (e) {
+                console.warn('尝试点击添加按钮失败:', e);
+            }
+            await this.delay(300);
+        }
+
+        const fallbackSelectors = [
+            '#add-author-btn',
+            '[onclick*="add"]',
+            '[data-action*="add"]',
+            '//button[contains(normalize-space(.), "添加")]',
+            '//button[contains(normalize-space(.), "新增")]',
+            '//a[contains(normalize-space(.), "添加")]',
+            '//a[contains(normalize-space(.), "新增")]'
+        ];
+
+        for (const selector of fallbackSelectors) {
+            try {
+                const result = await this.toolExecutor.execute(
+                    'ClickElement',
+                    { selector, tabId: this.formTabId },
+                    { tabId: this.formTabId }
+                );
+                if (result.success) {
+                    console.log(`点击添加按钮成功: ${selector}`);
+                    return true;
+                }
+            } catch (e) {
+                console.warn(`尝试点击 ${selector} 失败:`, e);
+            }
+            await this.delay(300);
+        }
+
+        return false;
+    }
+
 }
 
 export { FormFillingAgent };

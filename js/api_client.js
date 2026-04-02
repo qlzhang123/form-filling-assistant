@@ -90,7 +90,7 @@ const getStoredWosApiKey = () => {
 };
 
 const WOS_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const WOS_CACHE_VERSION = 5;
+const WOS_CACHE_VERSION = 7;
 
 const getWosCacheKey = (doi) => `_wos_cache_${normalizeDoi(doi).toLowerCase()}`;
 
@@ -1032,6 +1032,45 @@ const chooseBestWosVenue = (titles) => {
 
 const dedupeTextList = (items) => Array.from(new Set((Array.isArray(items) ? items : []).map(item => String(item || '').trim()).filter(Boolean)));
 
+const ORGANIZATIONISH_NAME_PATTERN = /\b(university|institute|college|academy|school|department|laboratory|lab|center|centre|society|association|machinery|foundation|committee|program|publisher|press|proceedings|conference|acm|ieee)\b/i;
+
+const tokenizeSemanticKey = (value) => String(value || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+
+const normalizeSemanticKey = (value) => tokenizeSemanticKey(value).join('');
+
+const getPathSegments = (path) => (Array.isArray(path) ? path : []).map(item => String(item || ''));
+
+const getPathTokens = (path) => getPathSegments(path).flatMap(tokenizeSemanticKey);
+
+const collectSemanticTextsByRule = (root, rule, path = [], out = []) => {
+    if (root == null) return out;
+    if (Array.isArray(root)) {
+        root.forEach((item, index) => collectSemanticTextsByRule(item, rule, [...path, String(index)], out));
+        return out;
+    }
+    if (typeof root !== 'object') return out;
+
+    for (const [key, value] of Object.entries(root)) {
+        const nextPath = [...path, key];
+        const keyNormalized = normalizeSemanticKey(key);
+        const pathTokens = getPathTokens(nextPath);
+        const hasContext = (rule.context || []).some(token => pathTokens.includes(token));
+        const leafMatched = (rule.leaf || []).some(token => keyNormalized.includes(token));
+        const codeMatched = (rule.codes || []).includes(keyNormalized);
+
+        if ((hasContext && leafMatched) || codeMatched) {
+            collectSourceTexts(value, out);
+        }
+        collectSemanticTextsByRule(value, rule, nextPath, out);
+    }
+
+    return out;
+};
+
 const parseAddrNoList = (value) => {
     if (value == null) return [];
     if (Array.isArray(value)) return dedupeTextList(value.map(item => String(item).trim()));
@@ -1039,6 +1078,47 @@ const parseAddrNoList = (value) => {
     if (!text) return [];
     return dedupeTextList(text.split(/[\s,;；|]+/).map(item => item.trim()).filter(Boolean));
 };
+
+const hasPersonIdentifier = (item) => {
+    const idEntries = collectNestedArray(item, ['data-item-ids.data-item-id']);
+    return idEntries.some(entry => {
+        const type = String(entry?.type || '').trim().toLowerCase();
+        const idType = String(entry?.['id-type'] || entry?.idType || '').trim().toLowerCase();
+        return Boolean(
+            type === 'person' ||
+            idType.includes('orcid') ||
+            idType.includes('rid') ||
+            idType.includes('researcher')
+        );
+    });
+};
+
+const scoreWosAuthorPersonhood = (item) => {
+    const role = String(item?.role || '').trim().toLowerCase();
+    const fullName = firstNonEmptyString(item?.full_name, item?.display_name, item?.wos_standard, item?.fullName);
+    const firstName = firstNonEmptyString(item?.first_name, item?.firstName, item?.preferred_name?.first_name, item?.preferredName?.firstName);
+    const lastName = firstNonEmptyString(item?.last_name, item?.lastName, item?.preferred_name?.last_name, item?.preferredName?.lastName);
+    const hasNameParts = Boolean(firstName || lastName);
+    const hasCommaName = /,/.test(String(fullName || ''));
+    const hasPersonIds = Boolean(firstNonEmptyString(item?.orcid_id, item?.orcid, item?.r_id, item?.researcher_id) || hasPersonIdentifier(item));
+    const hasAffiliationLink = parseAddrNoList(item?.addr_no || item?.addr_no_list || item?.addrNo).length > 0;
+    const normalizedName = String(fullName || '').trim();
+    const looksInstitutional = ORGANIZATIONISH_NAME_PATTERN.test(normalizedName);
+    const looksAllCapsInstitution = normalizedName.length > 0 && normalizedName === normalizedName.toUpperCase() && /\b[A-Z]{3,}\b/.test(normalizedName);
+
+    let score = 0;
+    if (role === 'author') score += 5;
+    if (hasNameParts) score += 4;
+    if (hasCommaName) score += 2;
+    if (hasPersonIds) score += 4;
+    if (hasAffiliationLink) score += 1;
+    if (looksInstitutional) score -= 6;
+    if (looksAllCapsInstitution) score -= 4;
+    if (!normalizedName) score -= 10;
+    return score;
+};
+
+const isLikelyWosAuthorPerson = (item) => scoreWosAuthorPersonhood(item) >= 4;
 
 const expandAcademicOrganizationName = (value) => {
     let text = String(value || '').trim();
@@ -1180,6 +1260,7 @@ const parseWosAuthors = (record) => {
     const seenNames = new Set();
 
     ensureArray(summaryNames).forEach((item, index) => {
+        if (!isLikelyWosAuthorPerson(item)) return;
         const fullName = firstNonEmptyString(item.full_name, item.display_name, item.wos_standard, item.fullName);
         if (!fullName || seenNames.has(fullName)) return;
         seenNames.add(fullName);
@@ -1271,6 +1352,289 @@ const extractWosEditions = (record) => {
     );
 
     return { editionRaw, indexedIn };
+};
+
+const WOS_CONFERENCE_PATHS = {
+    title: [
+        'static_data.fullrecord_metadata.conference_info.conference_title',
+        'static_data.fullrecord_metadata.conference_info.conference_name',
+        'static_data.fullrecord_metadata.conference_info.title',
+        'static_data.fullrecord_metadata.conference_info.ct',
+        'static_data.summary.conference_info.conference_title',
+        'static_data.summary.conference_info.conference_name',
+        'static_data.summary.conferences.conference.conference_title',
+        'static_data.summary.conferences.conference.conference_name'
+    ],
+    location: [
+        'static_data.fullrecord_metadata.conference_info.conference_location',
+        'static_data.fullrecord_metadata.conference_info.conference_city',
+        'static_data.fullrecord_metadata.conference_info.conference_country',
+        'static_data.fullrecord_metadata.conference_info.location',
+        'static_data.fullrecord_metadata.conference_info.cl',
+        'static_data.summary.conference_info.conference_location',
+        'static_data.summary.conference_info.conference_city',
+        'static_data.summary.conference_info.conference_country'
+    ],
+    date: [
+        'static_data.fullrecord_metadata.conference_info.conference_dates',
+        'static_data.fullrecord_metadata.conference_info.conference_date',
+        'static_data.fullrecord_metadata.conference_info.date',
+        'static_data.fullrecord_metadata.conference_info.cy',
+        'static_data.summary.conference_info.conference_dates',
+        'static_data.summary.conference_info.conference_date'
+    ],
+    host: [
+        'static_data.fullrecord_metadata.conference_info.conference_host',
+        'static_data.fullrecord_metadata.conference_info.host',
+        'static_data.fullrecord_metadata.conference_info.hosts.host',
+        'static_data.fullrecord_metadata.conference_info.ho',
+        'static_data.summary.conference_info.conference_host',
+        'static_data.summary.conference_info.host'
+    ],
+    sponsor: [
+        'static_data.fullrecord_metadata.conference_info.conference_sponsors.sponsor',
+        'static_data.fullrecord_metadata.conference_info.conference_sponsor',
+        'static_data.fullrecord_metadata.conference_info.sponsors.sponsor',
+        'static_data.fullrecord_metadata.conference_sponsors.sponsor',
+        'static_data.fullrecord_metadata.conference_sponsor',
+        'static_data.fullrecord_metadata.conference_info.sp',
+        'static_data.summary.conference_info.conference_sponsors.sponsor',
+        'static_data.summary.conference_info.conference_sponsor'
+    ]
+};
+
+const WOS_CONFERENCE_SEMANTIC_RULES = {
+    title: {
+        context: ['conference', 'conf', 'meeting', 'symposium', 'workshop'],
+        leaf: ['conferencetitle', 'conferencename', 'title', 'name'],
+        codes: ['ct']
+    },
+    location: {
+        context: ['conference', 'conf', 'meeting', 'symposium', 'workshop'],
+        leaf: ['conferencelocation', 'conferencecity', 'conferencecountry', 'location', 'city', 'country', 'address'],
+        codes: ['cl']
+    },
+    date: {
+        context: ['conference', 'conf', 'meeting', 'symposium', 'workshop'],
+        leaf: ['conferencedate', 'conferencedates', 'date', 'dates', 'startdate', 'enddate'],
+        codes: ['cy']
+    },
+    host: {
+        context: ['conference', 'conf', 'meeting', 'symposium', 'workshop'],
+        leaf: ['conferencehost', 'host', 'hosts', 'organizer', 'organizers', 'organiser', 'organisers', 'chair'],
+        codes: ['ho']
+    },
+    sponsor: {
+        context: ['conference', 'conf', 'meeting', 'symposium', 'workshop'],
+        leaf: ['conferencesponsor', 'conferencesponsors', 'sponsor', 'sponsors'],
+        codes: ['sp']
+    }
+};
+
+const collectConferenceSemanticValues = (record, key) => {
+    const rule = WOS_CONFERENCE_SEMANTIC_RULES[key];
+    if (!rule) return [];
+    return dedupeTextList(collectSemanticTextsByRule(record, rule));
+};
+
+const collectSourceTexts = (value, out = [], seen = new WeakSet(), depth = 0) => {
+    if (value == null || depth > 5) return out;
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        const text = String(value).trim();
+        if (text) out.push(text);
+        return out;
+    }
+    if (Array.isArray(value)) {
+        value.forEach(item => collectSourceTexts(item, out, seen, depth + 1));
+        return out;
+    }
+    if (typeof value === 'object') {
+        if (seen.has(value)) return out;
+        seen.add(value);
+        const directKeys = ['content', 'text', 'label', 'title', 'name', 'display_name', 'full_name', 'fullName', 'value'];
+        for (const key of directKeys) {
+            if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+            collectSourceTexts(value[key], out, seen, depth + 1);
+        }
+        Object.values(value).forEach(item => collectSourceTexts(item, out, seen, depth + 1));
+    }
+    return out;
+};
+
+const collectTextValuesByPaths = (root, paths) => {
+    const out = [];
+    for (const path of paths || []) {
+        const value = getNestedValue(root, path);
+        if (value == null) continue;
+        collectSourceTexts(value, out);
+    }
+    return dedupeTextList(out);
+};
+
+const pickBestConferenceText = (values, forbidden = []) => {
+    const banned = new Set((forbidden || []).map(item => String(item || '').trim().toLowerCase()).filter(Boolean));
+    const scored = dedupeTextList(values).map(raw => {
+        const text = String(raw || '').trim();
+        let score = Math.min(text.length, 120);
+        if (banned.has(text.toLowerCase())) score -= 120;
+        if (/\b(19|20)\d{2}\b/.test(text)) score -= 10;
+        if (/[a-z]/.test(text)) score += 4;
+        if (/\s/.test(text)) score += 4;
+        return { text, score };
+    }).sort((a, b) => b.score - a.score);
+    return scored[0]?.text || '';
+};
+
+const normalizeConferenceOrganizations = (values, forbidden = []) => {
+    const banned = new Set((forbidden || []).map(item => normalizeWosTitleText(item).toLowerCase()).filter(Boolean));
+    const monthPattern = /\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b/i;
+    return dedupeTextList(values)
+        .map(item => normalizeWosTitleText(item))
+        .filter(Boolean)
+        .filter(item => !banned.has(item.toLowerCase()))
+        .filter(item => !monthPattern.test(item))
+        .filter(item => !/\b(19|20)\d{2}\b/.test(item))
+        .filter(item => !/(conference|proceedings|symposium|workshop|meeting)$/i.test(item))
+        .filter(item => item.length <= 160);
+};
+
+const parseWosConferenceDateParts = (value, fallbackYear = '') => {
+    const raw = firstNonEmptyString(value).replace(/\s+/g, ' ').trim();
+    if (!raw) {
+        return {
+            conferenceEventDate: '',
+            conferenceStartDate: '',
+            conferenceStartYear: '',
+            conferenceStartMonth: '',
+            conferenceStartDay: '',
+            conferenceEndDate: '',
+            conferenceEndYear: '',
+            conferenceEndMonth: '',
+            conferenceEndDay: ''
+        };
+    }
+
+    const monthToken = '(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)';
+    const normalized = raw.replace(/[–—~]/g, '-');
+
+    const crossMonth = normalized.match(new RegExp(`\\b${monthToken}\\b\\s*(\\d{1,2})\\s*-\\s*${monthToken}\\b\\s*(\\d{1,2}),?\\s*(\\d{4})`, 'i'));
+    if (crossMonth) {
+        const startMonth = MONTH_TO_NUMBER[crossMonth[1].toUpperCase()] || '';
+        const startDay = String(crossMonth[2]).padStart(2, '0');
+        const endMonth = MONTH_TO_NUMBER[crossMonth[3].toUpperCase()] || '';
+        const endDay = String(crossMonth[4]).padStart(2, '0');
+        const year = crossMonth[5] || '';
+        const conferenceStartDate = [year, startMonth, startDay].filter(Boolean).join('-');
+        const conferenceEndDate = [year, endMonth, endDay].filter(Boolean).join('-');
+        return {
+            conferenceEventDate: conferenceStartDate && conferenceEndDate ? `${conferenceStartDate}~${conferenceEndDate}` : raw,
+            conferenceStartDate,
+            conferenceStartYear: year,
+            conferenceStartMonth: startMonth,
+            conferenceStartDay: startDay,
+            conferenceEndDate,
+            conferenceEndYear: year,
+            conferenceEndMonth: endMonth,
+            conferenceEndDay: endDay
+        };
+    }
+
+    const sameMonth = normalized.match(new RegExp(`\\b${monthToken}\\b\\s*(\\d{1,2})(?:\\s*-\\s*(\\d{1,2}))?,?\\s*(\\d{4})`, 'i'));
+    if (sameMonth) {
+        const month = MONTH_TO_NUMBER[sameMonth[1].toUpperCase()] || '';
+        const startDay = String(sameMonth[2]).padStart(2, '0');
+        const endDay = sameMonth[3] ? String(sameMonth[3]).padStart(2, '0') : startDay;
+        const year = sameMonth[4] || '';
+        const conferenceStartDate = [year, month, startDay].filter(Boolean).join('-');
+        const conferenceEndDate = [year, month, endDay].filter(Boolean).join('-');
+        return {
+            conferenceEventDate: conferenceStartDate && conferenceEndDate
+                ? (conferenceStartDate === conferenceEndDate ? conferenceStartDate : `${conferenceStartDate}~${conferenceEndDate}`)
+                : raw,
+            conferenceStartDate,
+            conferenceStartYear: year,
+            conferenceStartMonth: month,
+            conferenceStartDay: startDay,
+            conferenceEndDate,
+            conferenceEndYear: year,
+            conferenceEndMonth: month,
+            conferenceEndDay: endDay
+        };
+    }
+
+    const loose = parseWosLooseDate(raw, fallbackYear);
+    return {
+        conferenceEventDate: loose.publicationDate || raw,
+        conferenceStartDate: loose.publicationDate || '',
+        conferenceStartYear: loose.publicationYear || '',
+        conferenceStartMonth: loose.publicationMonth || '',
+        conferenceStartDay: loose.publicationDay || '',
+        conferenceEndDate: '',
+        conferenceEndYear: '',
+        conferenceEndMonth: '',
+        conferenceEndDay: ''
+    };
+};
+
+const deriveConferenceTitleFromVenue = (venue, documentType = '', editionInfo = null) => {
+    const rawVenue = normalizeWosTitleText(venue);
+    if (!rawVenue) return '';
+    const isConferenceLike =
+        /conference|proceedings|meeting|symposium|workshop|proceedings paper/i.test(String(documentType || '')) ||
+        (Array.isArray(editionInfo?.indexedIn) && editionInfo.indexedIn.some(item => /^(ISTP|ISSHP|CPCI|CPCI-S|CPCI-SSH)$/i.test(String(item || '').trim())));
+    if (!isConferenceLike) return '';
+    return rawVenue
+        .replace(/^proceedings of (the )?/i, '')
+        .replace(/^proceedings,\s*/i, '')
+        .trim();
+};
+
+const extractWosConferenceMetadata = (record, editionInfo, documentType = '', venue = '') => {
+    const titleCandidates = dedupeTextList([
+        ...collectTextValuesByPaths(record, WOS_CONFERENCE_PATHS.title),
+        ...collectConferenceSemanticValues(record, 'title')
+    ]);
+    const locationCandidates = dedupeTextList([
+        ...collectTextValuesByPaths(record, WOS_CONFERENCE_PATHS.location),
+        ...collectConferenceSemanticValues(record, 'location')
+    ]);
+    const dateCandidates = dedupeTextList([
+        ...collectTextValuesByPaths(record, WOS_CONFERENCE_PATHS.date),
+        ...collectConferenceSemanticValues(record, 'date')
+    ]);
+    const hostCandidates = dedupeTextList([
+        ...collectTextValuesByPaths(record, WOS_CONFERENCE_PATHS.host),
+        ...collectConferenceSemanticValues(record, 'host')
+    ]);
+    const sponsorCandidates = dedupeTextList([
+        ...collectTextValuesByPaths(record, WOS_CONFERENCE_PATHS.sponsor),
+        ...collectConferenceSemanticValues(record, 'sponsor')
+    ]);
+
+    const conferenceTitle = pickBestConferenceText(titleCandidates, [venue]) || deriveConferenceTitleFromVenue(venue, documentType, editionInfo);
+    const conferenceLocation = pickBestConferenceText(locationCandidates, [conferenceTitle, venue]);
+    const conferenceDateRaw = pickBestConferenceText(dateCandidates);
+    const organizers = normalizeConferenceOrganizations(
+        [...hostCandidates, ...sponsorCandidates],
+        [conferenceTitle, conferenceLocation, venue]
+    );
+    const dateParts = parseWosConferenceDateParts(conferenceDateRaw, '');
+    const isConferenceRecord =
+        /conference|proceedings|meeting|symposium|workshop|proceedings paper/i.test(String(documentType || '')) ||
+        (Array.isArray(editionInfo?.indexedIn) && editionInfo.indexedIn.some(item => /^(ISTP|ISSHP|CPCI|CPCI-S|CPCI-SSH)$/i.test(String(item || '').trim()))) ||
+        Boolean(conferenceTitle || conferenceLocation || conferenceDateRaw || organizers.length);
+
+    return {
+        isConferenceRecord,
+        conferenceName: conferenceTitle,
+        conferenceTitle,
+        conferenceLocation,
+        conferenceDateRaw,
+        organizers,
+        conferenceHosts: normalizeConferenceOrganizations(hostCandidates, [conferenceTitle, conferenceLocation, venue]),
+        conferenceSponsors: normalizeConferenceOrganizations(sponsorCandidates, [conferenceTitle, conferenceLocation, venue]),
+        ...dateParts
+    };
 };
 
 const extractWosFunding = (fullMeta) => {
@@ -1385,23 +1749,17 @@ const normalizeWosRecord = (record, doi) => {
     const normalizedAuthors = parseWosAuthors(record);
     const pageInfo = parseWosPageRange(pubInfo.page || pubInfo.pages);
     const publicationParts = parseWosPublicationParts(pubInfo);
-    const conferenceInfo = getNestedValue(fullMeta, 'conference_info', {}) || {};
     const identifiers = extractWosIdentifiers(record);
+    const venue = firstNonEmptyString(
+        chooseBestWosVenue(sourceTitles),
+        getNestedValue(record, 'source.title', '')
+    );
     const fundingInfo = extractWosFunding(fullMeta);
     const subjectCategories = extractWosSubjects(fullMeta);
     const citationTopics = extractWosCitationTopics(record);
     const usageStats = extractWosUsageStats(record);
     const editionInfo = extractWosEditions(record);
     const publisher = extractWosPublisher(summary);
-    const venue = firstNonEmptyString(
-        chooseBestWosVenue(sourceTitles),
-        getNestedValue(record, 'source.title', '')
-    );
-    const title = firstNonEmptyString(
-        chooseBestWosTitle(itemTitles, [venue, conferenceInfo.conference_title, conferenceInfo.conference_name]),
-        normalizeWosTitleText(getNestedValue(record, 'title.value', '')),
-        normalizeWosTitleText(getNestedValue(record, 'title', ''))
-    );
     const abstract = cleanWosAbstractText(abstractParts.map(part => {
         if (typeof part === 'string') return part.trim();
         return firstNonEmptyString(part.content, part.value, part);
@@ -1415,7 +1773,13 @@ const normalizeWosRecord = (record, doi) => {
         getNestedValue(record, 'static_data.summary.doctypes.doctype.content', ''),
         getNestedValue(record, 'static_data.summary.doctypes.doctype', '')
     );
-    const isConferenceRecord = /conference|proceedings|meeting|symposium|workshop/i.test(String(documentType || ''));
+    const conferenceInfo = extractWosConferenceMetadata(record, editionInfo, documentType, venue);
+    const title = firstNonEmptyString(
+        chooseBestWosTitle(itemTitles, [venue, conferenceInfo.conferenceTitle, conferenceInfo.conferenceName]),
+        normalizeWosTitleText(getNestedValue(record, 'title.value', '')),
+        normalizeWosTitleText(getNestedValue(record, 'title', ''))
+    );
+    const isConferenceRecord = conferenceInfo.isConferenceRecord;
 
     return {
         title,
@@ -1456,10 +1820,21 @@ const normalizeWosRecord = (record, doi) => {
         authorsDetailed: normalizedAuthors.authorsDetailed,
         authorEntries: normalizedAuthors.authorsDetailed,
         organizations: normalizedAuthors.organizations,
-        conferenceName: isConferenceRecord ? firstNonEmptyString(conferenceInfo.conference_title, conferenceInfo.conference_name) : '',
-        conferenceTitle: isConferenceRecord ? firstNonEmptyString(conferenceInfo.conference_title, conferenceInfo.conference_name) : '',
-        conferenceLocation: isConferenceRecord ? firstNonEmptyString(conferenceInfo.conference_location, conferenceInfo.conference_city, conferenceInfo.conference_country) : '',
-        conferenceEventDate: isConferenceRecord ? firstNonEmptyString(conferenceInfo.conference_dates, conferenceInfo.conference_date) : '',
+        conferenceName: isConferenceRecord ? conferenceInfo.conferenceName : '',
+        conferenceTitle: isConferenceRecord ? conferenceInfo.conferenceTitle : '',
+        conferenceLocation: isConferenceRecord ? conferenceInfo.conferenceLocation : '',
+        conferenceEventDate: isConferenceRecord ? conferenceInfo.conferenceEventDate : '',
+        conferenceStartDate: isConferenceRecord ? conferenceInfo.conferenceStartDate : '',
+        conferenceStartYear: isConferenceRecord ? conferenceInfo.conferenceStartYear : '',
+        conferenceStartMonth: isConferenceRecord ? conferenceInfo.conferenceStartMonth : '',
+        conferenceStartDay: isConferenceRecord ? conferenceInfo.conferenceStartDay : '',
+        conferenceEndDate: isConferenceRecord ? conferenceInfo.conferenceEndDate : '',
+        conferenceEndYear: isConferenceRecord ? conferenceInfo.conferenceEndYear : '',
+        conferenceEndMonth: isConferenceRecord ? conferenceInfo.conferenceEndMonth : '',
+        conferenceEndDay: isConferenceRecord ? conferenceInfo.conferenceEndDay : '',
+        conferenceHosts: isConferenceRecord ? conferenceInfo.conferenceHosts : [],
+        conferenceSponsors: isConferenceRecord ? conferenceInfo.conferenceSponsors : [],
+        organizers: isConferenceRecord ? conferenceInfo.organizers : [],
         ...publicationParts,
         ...pageInfo
     };

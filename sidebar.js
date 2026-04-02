@@ -1323,7 +1323,26 @@ class FormFillingSidebar {
                 researcherId: this.stringifyPaperValue(item?.researcherId),
                 reprint: Boolean(item?.reprint)
             };
-        }).filter(item => item.fullName);
+        }).filter(item => this.isLikelyPersonAuthorEntry(item));
+    }
+
+    isLikelyPersonAuthorEntry(item) {
+        const fullName = this.stringifyPaperValue(item?.fullName || item?.name);
+        if (!fullName) return false;
+
+        const hasPersonSignals = Boolean(
+            this.stringifyPaperValue(item?.firstName) ||
+            this.stringifyPaperValue(item?.lastName) ||
+            this.stringifyPaperValue(item?.orcid) ||
+            this.stringifyPaperValue(item?.researcherId)
+        );
+
+        const institutionalPattern = /\b(university|institute|college|academy|school|department|laboratory|lab|center|centre|society|association|machinery|foundation|committee|program|publisher|press|proceedings|conference|acm|ieee)\b/i;
+        if (institutionalPattern.test(fullName) && !hasPersonSignals) {
+            return false;
+        }
+
+        return true;
     }
 
     buildTempAuthorsFromPaper(paper) {
@@ -1418,14 +1437,23 @@ class FormFillingSidebar {
     inferCanonicalPaperType(paper) {
         const rawType = String(paper?.documentType || paper?.type || paper?.paperType || '').toLowerCase();
         const venue = String(paper?.venueRaw || paper?.venue || '').toLowerCase();
+        const indexingTokens = this.normalizePaperListValue(paper?.indexedIn || paper?.indexing || paper?.editionRaw)
+            .map(item => String(item || '').toUpperCase().trim());
+        const hasConferenceMetadata = Boolean(
+            this.stringifyPaperValue(paper?.conferenceName || paper?.conferenceTitle) ||
+            this.stringifyPaperValue(paper?.conferenceLocation) ||
+            this.stringifyPaperValue(paper?.conferenceEventDate) ||
+            (Array.isArray(paper?.organizers) && paper.organizers.length)
+        );
+        const isConferenceIndex = indexingTokens.some(token => /^(ISTP|ISSHP|CPCI|CPCI-S|CPCI-SSH|WOS\.ISTP|WOS\.ISSHP)$/.test(token));
+        if (/(conference|proceedings|inproceedings|meeting|symposium|workshop)/.test(rawType) || isConferenceIndex || hasConferenceMetadata) return '会议论文';
         if (/(article|journal)/.test(rawType)) return '期刊论文';
-        if (/(conference|proceedings|inproceedings|meeting|symposium|workshop)/.test(rawType)) return '会议论文';
         if (/(thesis)/.test(rawType)) return '学位论文';
         if (/(patent)/.test(rawType)) return '专利';
         if (/(dataset)/.test(rawType)) return '数据集';
         if (/(preprint|arxiv)/.test(rawType)) return '预印本';
-        if (/(journal|transactions|letters|review|management|science)/.test(venue)) return '期刊论文';
         if (/(conference|symposium|workshop|proceedings)/.test(venue)) return '会议论文';
+        if (/(journal|transactions|letters|review|management|science)/.test(venue)) return '期刊论文';
         return '';
     }
 
@@ -1612,24 +1640,32 @@ class FormFillingSidebar {
             canonical.conferenceLocation = pickString(enriched.conferenceLocation, base.conferenceLocation);
             canonical.conferenceEventDate = pickString(enriched.conferenceEventDate, base.conferenceEventDate);
             canonical.conferenceStartDate = pickString(enriched.conferenceStartDate, base.conferenceStartDate);
+            canonical.conferenceStartYear = pickString(enriched.conferenceStartYear, base.conferenceStartYear);
             canonical.conferenceEndDate = pickString(enriched.conferenceEndDate, base.conferenceEndDate);
+            canonical.conferenceEndYear = pickString(enriched.conferenceEndYear, base.conferenceEndYear);
             canonical.conferenceStartMonth = pickString(enriched.conferenceStartMonth, base.conferenceStartMonth);
             canonical.conferenceStartDay = pickString(enriched.conferenceStartDay, base.conferenceStartDay);
             canonical.conferenceEndMonth = pickString(enriched.conferenceEndMonth, base.conferenceEndMonth);
             canonical.conferenceEndDay = pickString(enriched.conferenceEndDay, base.conferenceEndDay);
             canonical.organizers = pickList(enriched.organizers, base.organizers);
+            canonical.conferenceHosts = pickList(enriched.conferenceHosts, base.conferenceHosts);
+            canonical.conferenceSponsors = pickList(enriched.conferenceSponsors, base.conferenceSponsors);
         } else {
             canonical.conferenceName = '';
             canonical.conferenceTitle = '';
             canonical.conferenceLocation = '';
             canonical.conferenceEventDate = '';
             canonical.conferenceStartDate = '';
+            canonical.conferenceStartYear = '';
             canonical.conferenceEndDate = '';
+            canonical.conferenceEndYear = '';
             canonical.conferenceStartMonth = '';
             canonical.conferenceStartDay = '';
             canonical.conferenceEndMonth = '';
             canonical.conferenceEndDay = '';
             canonical.organizers = [];
+            canonical.conferenceHosts = [];
+            canonical.conferenceSponsors = [];
         }
 
         canonical.displayTitle = canonical.title || baseTitle || enrichedTitle || '未命名论文';
@@ -1695,6 +1731,8 @@ class FormFillingSidebar {
             push('会议名称', '会议名称', paper.conferenceName || paper.conferenceTitle);
             push('会议地点', '会议地点', paper.conferenceLocation);
             push('会议组织者', '会议组织者', this.normalizePaperListValue(paper.organizers).join('；'));
+            push('会议主办方', '会议主办方', this.normalizePaperListValue(paper.conferenceHosts).join('；'));
+            push('会议赞助方', '会议赞助方', this.normalizePaperListValue(paper.conferenceSponsors).join('；'));
             push('会议举办日期', '会议举办日期', paper.conferenceEventDate);
             push('会议开始日期', '会议开始日期', paper.conferenceStartDate);
             push('会议结束日期', '会议结束日期', paper.conferenceEndDate);
@@ -1903,8 +1941,17 @@ class FormFillingSidebar {
             };
             const baseKeys = ['title', 'authors', 'authorAffiliations', 'authorEntries', 'organizations', 'venue', 'year', 'doi', 'url', 'source'];
             for (const key of baseKeys) copyField(key);
-            for (const key of ['abstract', 'citationCount', 'articleNumber', 'identifiers', 'issn', 'eissn', 'pageCount', 'firstPage', 'lastPage', 'pageRange', 'publicationDate', 'publicationMonth', 'publicationDay', 'earlyAccessDate', 'earlyAccessYear', 'earlyAccessMonth', 'earlyAccessDay', 'conferenceEventDate', 'conferenceStartDate', 'conferenceEndDate', 'conferenceStartMonth', 'conferenceStartDay', 'conferenceEndMonth', 'conferenceEndDay', 'language', 'conferenceName', 'conferenceTitle', 'conferenceLocation', 'volume', 'issue', 'wosUid', 'documentType', 'publicationType', 'publisher', 'citationTopics', 'usageStats', 'dataAvailabilityStatement', 'fundingText']) {
+            for (const key of ['abstract', 'citationCount', 'articleNumber', 'identifiers', 'issn', 'eissn', 'pageCount', 'firstPage', 'lastPage', 'pageRange', 'publicationDate', 'publicationMonth', 'publicationDay', 'earlyAccessDate', 'earlyAccessYear', 'earlyAccessMonth', 'earlyAccessDay', 'conferenceEventDate', 'conferenceStartDate', 'conferenceStartYear', 'conferenceEndDate', 'conferenceEndYear', 'conferenceStartMonth', 'conferenceStartDay', 'conferenceEndMonth', 'conferenceEndDay', 'language', 'conferenceName', 'conferenceTitle', 'conferenceLocation', 'volume', 'issue', 'wosUid', 'documentType', 'publicationType', 'publisher', 'citationTopics', 'usageStats', 'dataAvailabilityStatement', 'fundingText']) {
                 copyField(key);
+            }
+            if (Array.isArray(details.conferenceHosts) && details.conferenceHosts.length && (!Array.isArray(merged.conferenceHosts) || merged.conferenceHosts.length === 0 || !preferExisting)) {
+                merged.conferenceHosts = details.conferenceHosts;
+            }
+            if (Array.isArray(details.conferenceSponsors) && details.conferenceSponsors.length && (!Array.isArray(merged.conferenceSponsors) || merged.conferenceSponsors.length === 0 || !preferExisting)) {
+                merged.conferenceSponsors = details.conferenceSponsors;
+            }
+            if (Array.isArray(details.organizers) && details.organizers.length && (!Array.isArray(merged.organizers) || merged.organizers.length === 0 || !preferExisting)) {
+                merged.organizers = details.organizers;
             }
             if (Array.isArray(details.indexedIn) && details.indexedIn.length && (!Array.isArray(merged.indexedIn) || merged.indexedIn.length === 0 || !preferExisting)) {
                 merged.indexedIn = details.indexedIn;
